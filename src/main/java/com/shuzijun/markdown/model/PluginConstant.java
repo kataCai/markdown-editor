@@ -33,4 +33,10 @@ public class PluginConstant {
     public static final String editorTextOperationKey="markdown.editor.editorTextOperation";
 
     public static final String editorAbsolutePathKey="markdown.editor.editorAbsolutePath";
+
+    /**
+     * Markdown 预览页顶部网页工具栏的全局默认显隐状态。
+     * 该配置控制的是 Vditor 页面内部工具栏，不是 IntelliJ IDE 原生工具栏。
+     */
+    public static final String editorPreviewToolbarVisibleKey = "markdown.editor.previewToolbarVisible";
 }

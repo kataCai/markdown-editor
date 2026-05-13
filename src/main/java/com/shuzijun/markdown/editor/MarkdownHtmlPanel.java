@@ -281,6 +281,23 @@ public class MarkdownHtmlPanel extends JCEFHtmlPanel {
         getCefBrowser().executeJavaScript("updateStyle('" + style + "'," + UIUtil.isUnderDarcula() + ");", getCefBrowser().getURL(), 0);
     }
 
+    /**
+     * 运行时切换网页预览顶部工具栏的显示状态。
+     * 这里通过调用页面中预先注入的 JS 函数完成显隐切换，避免为一个简单开关重建整个 Vditor 实例，
+     * 也能让右键菜单切换在当前已打开的预览页上立即生效。
+     *
+     * @param visible {@code true} 表示显示顶部工具栏，{@code false} 表示隐藏顶部工具栏
+     */
+    public void setPreviewToolbarVisible(boolean visible) {
+        getCefBrowser().executeJavaScript("window.setPreviewToolbarVisible(" + visible + ");", getCefBrowser().getURL(), 0);
+    }
+
+    /**
+     * 在预览高度修正开关开启时，将宿主组件高度同步给网页。
+     *
+     * @param width  当前预览组件宽度
+     * @param height 当前预览组件高度
+     */
     public void updateHeight(int width,int height) {
         if (PropertiesComponent.getInstance().getBoolean(PluginConstant.editorFixToolbarKey,true)){
             getCefBrowser().executeJavaScript("updateHeight(" + width + "," + height + ");", getCefBrowser().getURL(), 0);

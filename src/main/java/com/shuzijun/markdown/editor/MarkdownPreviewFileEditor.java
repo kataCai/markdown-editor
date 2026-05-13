@@ -4,6 +4,7 @@ import com.google.common.escape.Escaper;
 import com.google.common.net.PercentEscaper;
 import com.google.common.net.UrlEscapers;
 import com.intellij.ide.structureView.StructureViewBuilder;
+import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.actionSystem.ActionManager;
 import com.intellij.openapi.actionSystem.ActionToolbar;
 import com.intellij.openapi.actionSystem.AnAction;
@@ -253,6 +254,7 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
                     .replace("{{userTemplate}}", templateFile.exists() + "")
                     .replace("{{projectUrl}}", isPresentableUrl ? URL_FRAGMENT_ESCAPER.escape(myProject.getPresentableUrl()) : "")
                     .replace("{{projectName}}", isPresentableUrl ? "" : URL_FRAGMENT_ESCAPER.escape(myProject.getName()))
+                    .replace("{{previewToolbarVisible}}", String.valueOf(isPreviewToolbarVisible()))
                     .replace("{{ideStyle}}", getStyle(true))
                     .replace("{{injectScript}}", tempPanel.getInjectScript())
                     ;
@@ -328,6 +330,31 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
         } else {
             searchField.setText("");
         }
+    }
+
+    /**
+     * 切换预览页顶部工具栏显示状态。
+     * 这里既要更新当前编辑器实例中的网页工具栏，也要在隐藏时顺带收起搜索条，
+     * 避免出现网页工具栏已关闭但搜索浮条仍残留在顶部的状态不一致问题。
+     *
+     * @param visible {@code true} 表示显示预览工具栏，{@code false} 表示隐藏
+     */
+    public void setPreviewToolbarVisible(boolean visible) {
+        if (myPanel != null) {
+            myPanel.setPreviewToolbarVisible(visible);
+        }
+        if (!visible) {
+            visibleToolbarPanel(false);
+        }
+    }
+
+    /**
+     * 读取预览工具栏的全局默认显示状态。
+     *
+     * @return {@code true} 表示默认显示，{@code false} 表示默认隐藏
+     */
+    private boolean isPreviewToolbarVisible() {
+        return PropertiesComponent.getInstance().getBoolean(PluginConstant.editorPreviewToolbarVisibleKey, false);
     }
 
     private class LabelMouseListener extends MouseAdapter {

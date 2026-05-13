@@ -55,6 +55,7 @@
     let fileValue = "";
     let saveTime = Date.now();
     const darcula = "{{darcula}}" === "true";
+    const previewToolbarVisible = "{{previewToolbarVisible}}" === "true";
 
     window.onload = function () {
         if (userTemplate) {
@@ -64,14 +65,10 @@
                 href: '{{service}}assets/vditor/userStyle.css'
             });
         }
+        // 工具栏节点由 Vditor 初始化后提供，这里只在节点存在时追加扩展内容。
         appendSyncedTip(!initError);
-        vditor.vditor.toolbar.elements.export.querySelectorAll(".vditor-hint")[0].innerHTML = "<button onclick='exportFile(\"pdf\")'>PDF</button>\n<button onclick='exportFile(\"html\")'>HTML</button>"
-        let infoHtml = vditor.vditor.toolbar.elements.info.querySelectorAll('button')[0].outerHTML;
-        vditor.vditor.toolbar.elements.info.querySelectorAll('button')[0].remove()
-        vditor.vditor.toolbar.elements.info.innerHTML = infoHtml;
-        vditor.vditor.toolbar.elements.info.querySelectorAll('button')[0].onclick = function () {
-            vditor.vditor.tip.show(document.getElementById("editorInfo").innerHTML, 0);
-        };
+        initToolbarExtensions();
+        window.setPreviewToolbarVisible(previewToolbarVisible);
         document.addEventListener('mousedown', (event) => {
             if (event.button === 2) {
                 if (window.getSelection().isCollapsed) {
@@ -157,21 +154,74 @@
     }
 
     function appendSyncedTip(isSynced) {
+        const toolbarElement = getToolbarElement();
+        if (!toolbarElement) {
+            return;
+        }
         let synced = document.createElement("span");
         synced.className = "vditor-counter vditor-tooltipped vditor-tooltipped__nw";
         synced.id = "syncedTip";
         synced.title = "Automatic synchronization after losing focus";
         synced.innerHTML = isSynced ? "Synced" : "Not Synced";
-        vditor.vditor.toolbar.element.appendChild(synced);
+        toolbarElement.appendChild(synced);
     }
 
     function syncedTip(isSynced, md) {
+        let syncedElement = document.getElementById("syncedTip");
+        if (!syncedElement) {
+            return;
+        }
         if (!initError && (isSynced || md === fileValue)) {
-            document.getElementById("syncedTip").innerHTML = "Synced";
+            syncedElement.innerHTML = "Synced";
         } else {
-            document.getElementById("syncedTip").innerHTML = "Not Synced";
+            syncedElement.innerHTML = "Not Synced";
         }
 
+    }
+
+    function getToolbarElement() {
+        if (!vditor || !vditor.vditor || !vditor.vditor.toolbar) {
+            return null;
+        }
+        return vditor.vditor.toolbar.element || null;
+    }
+
+    function initToolbarExtensions() {
+        if (!vditor || !vditor.vditor || !vditor.vditor.toolbar || !vditor.vditor.toolbar.elements) {
+            return;
+        }
+        const toolbarElements = vditor.vditor.toolbar.elements;
+        const exportElement = toolbarElements.export;
+        if (exportElement) {
+            const exportHints = exportElement.querySelectorAll(".vditor-hint");
+            if (exportHints.length > 0) {
+                exportHints[0].innerHTML = "<button onclick='exportFile(\"pdf\")'>PDF</button>\n<button onclick='exportFile(\"html\")'>HTML</button>";
+            }
+        }
+        const infoElement = toolbarElements.info;
+        if (infoElement) {
+            const infoButtons = infoElement.querySelectorAll("button");
+            if (infoButtons.length > 0) {
+                const infoHtml = infoButtons[0].outerHTML;
+                infoButtons[0].remove();
+                infoElement.innerHTML = infoHtml;
+                const rebuiltButtons = infoElement.querySelectorAll("button");
+                if (rebuiltButtons.length > 0) {
+                    rebuiltButtons[0].onclick = function () {
+                        vditor.vditor.tip.show(document.getElementById("editorInfo").innerHTML, 0);
+                    };
+                }
+            }
+        }
+    }
+
+    // 运行时只切换工具栏容器显隐，避免重建整个 Vditor 实例导致光标和编辑状态丢失。
+    window.setPreviewToolbarVisible = function (visible) {
+        const toolbarElement = getToolbarElement();
+        if (!toolbarElement) {
+            return;
+        }
+        toolbarElement.style.display = visible ? "" : "none";
     }
 
     function exportFile(type) {
@@ -327,6 +377,7 @@
         "value": initValue(),
         after() {
             fileValue = vditor.getValue()
+            window.setPreviewToolbarVisible(previewToolbarVisible);
         },
         blur(md) {
             editBlur(md,false)

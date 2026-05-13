@@ -66,5 +66,11 @@
                 description="Toggle preview toolbar visibility">
             <add-to-group group-id="EditorTabPopupMenu" anchor="last"/>
         </action>
+        <action id="markdown.forceRefreshPreview"
+                class="com.shuzijun.markdown.editor.ForceRefreshPreviewAction"
+                text="Force Refresh Preview"
+                description="Force rebuild current markdown preview page">
+            <add-to-group group-id="EditorTabPopupMenu" anchor="last"/>
+        </action>
     </actions>
 </idea-plugin>

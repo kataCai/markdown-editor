@@ -4,6 +4,36 @@
     <link rel="stylesheet" href="{{service}}resources/vditor/style.css?{{serverToken}}"/>
     <script src="{{service}}resources/vditor/dist/index.min.js?{{serverToken}}"></script>
     <script src="{{service}}resources/vditor/jquery-3.6.0.min.js?{{serverToken}}"></script>
+    <style>
+        /* 只读态保持内容可读，不沿用 Vditor 默认的半透明禁用视觉。 */
+        #vditor.preview-readonly .vditor-wysiwyg pre.vditor-reset[contenteditable="false"],
+        #vditor.preview-readonly .vditor-ir pre.vditor-reset[contenteditable="false"],
+        #vditor.preview-readonly .vditor-sv[contenteditable="false"] {
+            opacity: 1;
+            cursor: default;
+            caret-color: transparent;
+            user-select: text;
+            -webkit-user-select: text;
+        }
+
+        /* 只读态下不展示 IR 展开后的 Markdown 标记，避免点击标题后出现 ### 等前缀。 */
+        #vditor.preview-readonly .vditor-ir__node--expand .vditor-ir__marker--heading,
+        #vditor.preview-readonly .vditor-ir__node--expand .vditor-ir__marker--bi,
+        #vditor.preview-readonly .vditor-ir__node--expand .vditor-ir__marker--link,
+        #vditor.preview-readonly .vditor-ir__node--expand .vditor-ir__marker--title,
+        #vditor.preview-readonly .vditor-ir__node--expand .vditor-ir__marker--bracket,
+        #vditor.preview-readonly .vditor-ir__node--expand .vditor-ir__marker--paren,
+        #vditor.preview-readonly .vditor-ir__node--expand .vditor-ir__marker--info,
+        #vditor.preview-readonly .vditor-ir__node--expand[data-type="code-block"]:before,
+        #vditor.preview-readonly .vditor-ir__node--expand[data-type="code-block"]:after,
+        #vditor.preview-readonly .vditor-ir__node--expand[data-type="yaml-front-matter"]:before,
+        #vditor.preview-readonly .vditor-ir__node--expand[data-type="yaml-front-matter"]:after,
+        #vditor.preview-readonly .vditor-ir__node--expand[data-type="math-block"]:before,
+        #vditor.preview-readonly .vditor-ir__node--expand[data-type="math-block"]:after {
+            display: none !important;
+            opacity: 0 !important;
+        }
+    </style>
 </head>
 <body class="body">
 <div id="vditor" class="vditor vditor--fullscreen"></div>
@@ -56,6 +86,8 @@
     let saveTime = Date.now();
     const darcula = "{{darcula}}" === "true";
     const previewToolbarVisible = "{{previewToolbarVisible}}" === "true";
+    const previewEditable = "{{previewEditable}}" === "true";
+    window.previewEditable = previewEditable;
 
     window.onload = function () {
         if (userTemplate) {
@@ -101,6 +133,9 @@
     }
 
     function editBlur(md,format) {
+        if (!window.previewEditable) {
+            return;
+        }
         if (initError) {
             vditor.tip("Get init file request error,Don't save.", 1000);
             return;
@@ -137,6 +172,9 @@
     }
 
     function editInput(md) {
+        if (!window.previewEditable) {
+            return;
+        }
         syncedTip(false, md)
     }
 
@@ -186,6 +224,105 @@
         return vditor.vditor.toolbar.element || null;
     }
 
+    /**
+     * 获取 Markdown Editor 预览根节点，用于承载项目自管的只读样式。
+     */
+    function getPreviewRootElement() {
+        return document.getElementById("vditor");
+    }
+
+    /**
+     * 获取当前 Vditor 模式对应的可编辑节点。
+     * 只读态需要对当前模式重新施加 contenteditable 和视觉控制。
+     */
+    function getCurrentModeElement() {
+        if (!vditor || !vditor.vditor || !vditor.vditor.currentMode) {
+            return null;
+        }
+        const currentMode = vditor.vditor.currentMode;
+        const currentEditor = vditor.vditor[currentMode];
+        if (!currentEditor) {
+            return null;
+        }
+        return currentEditor.element || null;
+    }
+
+    /**
+     * 统一同步当前模式节点的 contenteditable，避免模式切换或刷新后丢失只读态。
+     */
+    function applyCurrentModeEditableState(editable) {
+        const currentModeElement = getCurrentModeElement();
+        if (!currentModeElement) {
+            return;
+        }
+        currentModeElement.setAttribute("contenteditable", editable ? "true" : "false");
+    }
+
+    /**
+     * IR 模式会在点击后给节点加上展开态 class，从而露出 ### 等 Markdown 标记。
+     * 只读态下需要主动清理这些 class，保持预览语义而不是编辑语义。
+     */
+    function collapseReadonlyExpandedNodes() {
+        const currentModeElement = getCurrentModeElement();
+        if (!currentModeElement) {
+            return;
+        }
+        const expandedNodes = currentModeElement.querySelectorAll(".vditor-ir__node--expand");
+        expandedNodes.forEach(function (node) {
+            node.classList.remove("vditor-ir__node--expand");
+        });
+    }
+
+    /**
+     * 同步项目自管的只读视觉状态。
+     */
+    function syncPreviewReadonlyClass(editable) {
+        const previewRootElement = getPreviewRootElement();
+        if (!previewRootElement) {
+            return;
+        }
+        previewRootElement.classList.toggle("preview-readonly", !editable);
+        if (!editable) {
+            collapseReadonlyExpandedNodes();
+        }
+    }
+
+    /**
+     * 只读态的编辑模式节点可能会在模式切换后被 Vditor 重建，延迟重放可编辑状态最稳妥。
+     */
+    function refreshPreviewEditableState() {
+        setTimeout(function () {
+            window.setPreviewEditable(window.previewEditable);
+        }, 0);
+    }
+
+    /**
+     * 绑定只读态的交互守卫。
+     * 这里不阻断文本选择和复制，只在交互完成后收口 IR 展开态，并拦截异常的 beforeinput。
+     */
+    function bindReadonlyInteractionGuards() {
+        const previewRootElement = getPreviewRootElement();
+        if (!previewRootElement || previewRootElement.dataset.previewReadonlyGuardBound === "true") {
+            return;
+        }
+        previewRootElement.dataset.previewReadonlyGuardBound = "true";
+        const readonlyNormalizeHandler = function (event) {
+            if (window.previewEditable) {
+                return;
+            }
+            if (event.type === "beforeinput") {
+                event.preventDefault();
+                return;
+            }
+            setTimeout(function () {
+                collapseReadonlyExpandedNodes();
+            }, 0);
+        };
+        previewRootElement.addEventListener("click", readonlyNormalizeHandler, true);
+        previewRootElement.addEventListener("dblclick", readonlyNormalizeHandler, true);
+        previewRootElement.addEventListener("beforeinput", readonlyNormalizeHandler, true);
+    }
+
     function initToolbarExtensions() {
         if (!vditor || !vditor.vditor || !vditor.vditor.toolbar || !vditor.vditor.toolbar.elements) {
             return;
@@ -213,6 +350,13 @@
                 }
             }
         }
+        const editModeElement = toolbarElements["edit-mode"];
+        if (editModeElement && editModeElement.dataset.previewEditableRefreshBound !== "true") {
+            editModeElement.dataset.previewEditableRefreshBound = "true";
+            editModeElement.addEventListener("click", function () {
+                refreshPreviewEditableState();
+            });
+        }
     }
 
     // 运行时只切换工具栏容器显隐，避免重建整个 Vditor 实例导致光标和编辑状态丢失。
@@ -222,6 +366,20 @@
             return;
         }
         toolbarElement.style.display = visible ? "" : "none";
+    }
+
+    window.setPreviewEditable = function (editable) {
+        window.previewEditable = editable;
+        if (!vditor || !vditor.vditor || !vditor.vditor.currentMode) {
+            return;
+        }
+        if (editable) {
+            vditor.enable();
+        } else {
+            vditor.disabled();
+        }
+        applyCurrentModeEditableState(editable);
+        syncPreviewReadonlyClass(editable);
     }
 
     function exportFile(type) {
@@ -377,7 +535,10 @@
         "value": initValue(),
         after() {
             fileValue = vditor.getValue()
+            bindReadonlyInteractionGuards();
+            initToolbarExtensions();
             window.setPreviewToolbarVisible(previewToolbarVisible);
+            window.setPreviewEditable(previewEditable);
         },
         blur(md) {
             editBlur(md,false)

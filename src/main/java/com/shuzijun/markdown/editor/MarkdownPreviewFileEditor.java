@@ -234,6 +234,7 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
     private @NotNull MarkdownHtmlPanel createPreviewPanel() {
         MarkdownHtmlPanel panel = new MarkdownHtmlPanel(previewUrl, myProject, true);
         panel.loadMyHTML(createHtml(isPresentableUrl, panel), previewUrl);
+        panel.setPreviewEditable(isPreviewEditable());
         return panel;
     }
 
@@ -335,6 +336,18 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
         rebuildPreviewPanel();
     }
 
+    /**
+     * 切换当前预览页是否允许编辑。
+     * 该方法只同步当前已打开的预览实例，全局默认值由右键菜单 Action 持久化。
+     *
+     * @param editable {@code true} 表示允许编辑，{@code false} 表示禁止编辑
+     */
+    public void setPreviewEditable(boolean editable) {
+        if (myPanel != null) {
+            myPanel.setPreviewEditable(editable);
+        }
+    }
+
     private String createHtml(boolean isPresentableUrl, MarkdownHtmlPanel tempPanel) {
         InputStream inputStream = null;
 
@@ -355,6 +368,7 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
                     .replace("{{projectUrl}}", isPresentableUrl ? URL_FRAGMENT_ESCAPER.escape(myProject.getPresentableUrl()) : "")
                     .replace("{{projectName}}", isPresentableUrl ? "" : URL_FRAGMENT_ESCAPER.escape(myProject.getName()))
                     .replace("{{previewToolbarVisible}}", String.valueOf(isPreviewToolbarVisible()))
+                    .replace("{{previewEditable}}", String.valueOf(isPreviewEditable()))
                     .replace("{{ideStyle}}", getStyle(true))
                     .replace("{{injectScript}}", tempPanel.getInjectScript())
                     ;
@@ -462,6 +476,15 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
      */
     private boolean isPreviewToolbarVisible() {
         return PropertiesComponent.getInstance().getBoolean(PluginConstant.editorPreviewToolbarVisibleKey, false);
+    }
+
+    /**
+     * 读取预览页可编辑状态的全局默认值。
+     *
+     * @return {@code true} 表示默认允许编辑，{@code false} 表示默认禁止编辑
+     */
+    private boolean isPreviewEditable() {
+        return PropertiesComponent.getInstance().getBoolean(PluginConstant.editorPreviewEditableKey, false);
     }
 
     /**

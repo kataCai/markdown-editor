@@ -72,5 +72,11 @@
                 description="Force rebuild current markdown preview page">
             <add-to-group group-id="EditorTabPopupMenu" anchor="last"/>
         </action>
+        <action id="markdown.togglePreviewEditable"
+                class="com.shuzijun.markdown.editor.TogglePreviewEditableAction"
+                text="Allow Preview Editing"
+                description="Allow editing in markdown preview">
+            <add-to-group group-id="EditorTabPopupMenu" anchor="last"/>
+        </action>
     </actions>
 </idea-plugin>

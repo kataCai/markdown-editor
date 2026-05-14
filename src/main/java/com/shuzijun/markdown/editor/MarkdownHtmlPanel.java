@@ -81,6 +81,11 @@ public class MarkdownHtmlPanel extends JCEFHtmlPanel {
     private final Project project;
     private final List<String> iframe = new ArrayList<>();
     private static final List<String> headers = Arrays.asList(HttpHeaderNames.CONTENT_SECURITY_POLICY.toString(), HttpHeaderNames.CONTENT_ENCODING.toString(), HttpHeaderNames.CONTENT_LENGTH.toString());
+    /**
+     * 当前预览页是否允许用户编辑内容。
+     * Java 侧的剪切、粘贴 Provider 会读取该状态，避免绕过网页侧 Vditor 的只读控制。
+     */
+    private volatile boolean previewEditable = false;
 
     public MarkdownHtmlPanel(@Nullable String url, Project project, boolean isFileEditor) {
         super(offScreenRendering(isFileEditor), null, null);
@@ -293,6 +298,17 @@ public class MarkdownHtmlPanel extends JCEFHtmlPanel {
     }
 
     /**
+     * 切换当前 JCEF 预览页的可编辑状态。
+     * 先更新 Java 侧状态，再同步到网页，使 IDE Provider 和 Vditor 状态保持一致。
+     *
+     * @param editable {@code true} 表示允许编辑，{@code false} 表示禁止编辑
+     */
+    public void setPreviewEditable(boolean editable) {
+        previewEditable = editable;
+        getCefBrowser().executeJavaScript("window.setPreviewEditable(" + editable + ");", getCefBrowser().getURL(), 0);
+    }
+
+    /**
      * 在预览高度修正开关开启时，将宿主组件高度同步给网页。
      *
      * @param width  当前预览组件宽度
@@ -304,6 +320,16 @@ public class MarkdownHtmlPanel extends JCEFHtmlPanel {
         }
     }
 
+    /**
+     * 判断当前是否允许执行会修改内容的文本操作。
+     * 复制不属于修改内容，因此不使用该判断。
+     *
+     * @return {@code true} 表示允许剪切、粘贴等修改内容的操作
+     */
+    private boolean isPreviewEditingOperationEnabled() {
+        return previewEditable && PropertiesComponent.getInstance().getBoolean(PluginConstant.editorTextOperationKey, true);
+    }
+
     public String getInjectScript() {
 
         String savaTime = "function jsAddTime(){saveTime = Date.now() + 1000;}\n";
@@ -313,10 +339,17 @@ public class MarkdownHtmlPanel extends JCEFHtmlPanel {
                 selectValueJSQuery.inject("value") +
                 "    }\n";
         String cut = "function jsCut(){\n" +
-                "        let value = vditor.getSelection();\nvditor.deleteValue()\n" +
+                "        if (!window.previewEditable) {\n" +
+                "            return;\n" +
+                "        }\n" +
+                "        let value = vditor.getSelection();\n"
+                + "        vditor.deleteValue()\n" +
                 selectValueJSQuery.inject("value") +
                 "    }\n";
         String paste = "function jsPaste(value){\n" +
+                "        if (!window.previewEditable) {\n" +
+                "            return;\n" +
+                "        }\n" +
                 "        vditor.updateValue(value);\n" +
                 "    }\n";
 
@@ -414,12 +447,12 @@ public class MarkdownHtmlPanel extends JCEFHtmlPanel {
 
                     @Override
                     public boolean isCutEnabled(@NotNull DataContext dataContext) {
-                        return PropertiesComponent.getInstance().getBoolean(PluginConstant.editorTextOperationKey, true);
+                        return isPreviewEditingOperationEnabled();
                     }
 
                     @Override
                     public boolean isCutVisible(@NotNull DataContext dataContext) {
-                        return PropertiesComponent.getInstance().getBoolean(PluginConstant.editorTextOperationKey, true);
+                        return isPreviewEditingOperationEnabled();
                     }
                 };
             }
@@ -439,12 +472,12 @@ public class MarkdownHtmlPanel extends JCEFHtmlPanel {
 
                     @Override
                     public boolean isPastePossible(@NotNull DataContext dataContext) {
-                        return PropertiesComponent.getInstance().getBoolean(PluginConstant.editorTextOperationKey, true);
+                        return isPreviewEditingOperationEnabled();
                     }
 
                     @Override
                     public boolean isPasteEnabled(@NotNull DataContext dataContext) {
-                        return PropertiesComponent.getInstance().getBoolean(PluginConstant.editorTextOperationKey, true);
+                        return isPreviewEditingOperationEnabled();
                     }
                 };
             }

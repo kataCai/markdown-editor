@@ -39,4 +39,10 @@ public class PluginConstant {
      * 该配置控制的是 Vditor 页面内部工具栏，不是 IntelliJ IDE 原生工具栏。
      */
     public static final String editorPreviewToolbarVisibleKey = "markdown.editor.previewToolbarVisible";
+
+    /**
+     * Markdown 预览页是否允许直接编辑的全局默认状态。
+     * 默认值由读取方使用 false 控制，表示新打开的预览页默认不可编辑。
+     */
+    public static final String editorPreviewEditableKey = "markdown.editor.previewEditable";
 }

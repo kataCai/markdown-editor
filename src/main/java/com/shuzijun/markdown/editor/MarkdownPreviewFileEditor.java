@@ -1,5 +1,6 @@
 package com.shuzijun.markdown.editor;
 
+import com.alibaba.fastjson.JSONObject;
 import com.google.common.escape.Escaper;
 import com.google.common.net.PercentEscaper;
 import com.google.common.net.UrlEscapers;
@@ -12,14 +13,25 @@ import com.intellij.openapi.actionSystem.DefaultActionGroup;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.editor.Document;
+import com.intellij.openapi.editor.Editor;
 import com.intellij.openapi.editor.colors.EditorColorsListener;
 import com.intellij.openapi.editor.colors.EditorColorsManager;
 import com.intellij.openapi.editor.colors.EditorColorsScheme;
 import com.intellij.openapi.editor.colors.impl.EditorColorsSchemeImpl;
+import com.intellij.openapi.editor.event.CaretEvent;
+import com.intellij.openapi.editor.event.CaretListener;
+import com.intellij.openapi.editor.event.DocumentListener;
+import com.intellij.openapi.editor.event.EditorEventMulticaster;
+import com.intellij.openapi.editor.event.VisibleAreaEvent;
+import com.intellij.openapi.editor.event.VisibleAreaListener;
+import com.intellij.openapi.fileEditor.FileEditorManager;
+import com.intellij.openapi.fileEditor.FileEditorManagerEvent;
+import com.intellij.openapi.fileEditor.FileEditorManagerListener;
 import com.intellij.openapi.fileEditor.FileDocumentManager;
 import com.intellij.openapi.fileEditor.FileEditor;
 import com.intellij.openapi.fileEditor.FileEditorLocation;
 import com.intellij.openapi.fileEditor.FileEditorState;
+import com.intellij.openapi.fileEditor.OpenFileDescriptor;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.util.UserDataHolderBase;
@@ -31,6 +43,7 @@ import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBPanel;
 import com.intellij.ui.components.JBTextField;
 import com.intellij.ui.components.ScrollBarPainter;
+import com.intellij.util.Alarm;
 import com.intellij.util.Url;
 import com.intellij.util.Urls;
 import com.intellij.util.io.URLUtil;
@@ -38,6 +51,9 @@ import com.intellij.util.messages.MessageBusConnection;
 import com.intellij.util.ui.UIUtil;
 import com.shuzijun.markdown.controller.FileApplicationService;
 import com.shuzijun.markdown.controller.PreviewStaticServer;
+import com.shuzijun.markdown.editor.sync.EditorViewportSyncSupport;
+import com.shuzijun.markdown.editor.sync.PreviewEditorSyncCoordinator;
+import com.shuzijun.markdown.editor.sync.PreviewSyncMessage;
 import com.shuzijun.markdown.model.PluginConstant;
 import com.shuzijun.markdown.util.FileUtils;
 import com.shuzijun.markdown.util.PropertiesUtils;
@@ -99,6 +115,19 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
     private final String templateHtmlFile = "template/default.html";
     private final boolean isPresentableUrl;
     private final String previewUrl;
+    private static final int PREVIEW_TO_EDITOR_SUPPRESS_MS = 280;
+    private static final int EDITOR_TO_PREVIEW_SUPPRESS_MS = 280;
+    /**
+     * 预览同步协调器。
+     * 该对象集中维护内容版本、预览页 ready/rendered 状态以及 reveal 挂起/补发逻辑，
+     * 避免这些判断继续散落在 UI 组件和事件监听器中。
+     */
+    private final PreviewEditorSyncCoordinator syncCoordinator;
+    /**
+     * 文档内容推送节流器。
+     * Markdown 源码变更时不直接每次按键都触发整页 `setValue`，而是做轻量延迟合并，降低 JCEF 重绘压力。
+     */
+    private final Alarm contentSyncAlarm;
 
     /**
      * 初始化 Markdown 预览编辑器。
@@ -115,8 +144,12 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
         myHtmlPanelWrapper = new JPanel(new BorderLayout());
         isPresentableUrl = project.getPresentableUrl() != null;
         previewUrl = UrlEscapers.urlFragmentEscaper().escape(URLUtil.FILE_PROTOCOL + URLUtil.SCHEME_SEPARATOR + FileUtils.separator() + myFile.getPath());
+        syncCoordinator = new PreviewEditorSyncCoordinator(myFile.getPath());
+        contentSyncAlarm = new Alarm(this);
+        syncCoordinator.updateDocument(myDocument.getText(), myDocument.getModificationStamp());
         initToolbarPanel();
         rebuildPreviewPanel();
+        initSyncInfrastructure();
 
         FileApplicationService fileApplicationService = ApplicationManager.getApplication().getService(FileApplicationService.class);
         fileApplicationService.putVirtualFile(myFile.getPath(), isPresentableUrl ? project.getPresentableUrl() : project.getName(), myFile);
@@ -195,6 +228,7 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
      * 从而在白屏场景下比简单浏览器 reload 具备更高的恢复概率。
      */
     private void rebuildPreviewPanel() {
+        syncCoordinator.resetPreviewLifecycle();
         MarkdownHtmlPanel oldPanel = myPanel;
         if (oldPanel != null) {
             myHtmlPanelWrapper.remove(oldPanel.getComponent());
@@ -233,9 +267,277 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
      */
     private @NotNull MarkdownHtmlPanel createPreviewPanel() {
         MarkdownHtmlPanel panel = new MarkdownHtmlPanel(previewUrl, myProject, true);
+        panel.setPreviewSyncMessageHandler(this::handlePreviewSyncMessage);
         panel.loadMyHTML(createHtml(isPresentableUrl, panel), previewUrl);
         panel.setPreviewEditable(isPreviewEditable());
         return panel;
+    }
+
+    /**
+     * 初始化宿主侧同步基础设施。
+     * 这里集中绑定文档变更、源码编辑器滚动/光标变化以及文件编辑器激活切换等监听入口，
+     * 为后续“源码 <-> 预览”联动提供统一事件源。
+     */
+    private void initSyncInfrastructure() {
+        EditorEventMulticaster eventMulticaster = com.intellij.openapi.editor.EditorFactory.getInstance().getEventMulticaster();
+        eventMulticaster.addDocumentListener(new DocumentListener() {
+            @Override
+            public void documentChanged(@NotNull com.intellij.openapi.editor.event.DocumentEvent event) {
+                if (event.getDocument() != myDocument) {
+                    return;
+                }
+                scheduleContentSync("documentChanged");
+            }
+        }, this);
+        eventMulticaster.addCaretListener(new CaretListener() {
+            @Override
+            public void caretPositionChanged(@NotNull CaretEvent event) {
+                Editor editor = event.getEditor();
+                if (!isPrimarySourceEditor(editor)) {
+                    return;
+                }
+                if (syncCoordinator.getState().isEditorEventSuppressed(System.currentTimeMillis())) {
+                    return;
+                }
+                revealPreviewForEditor(editor, "caret");
+            }
+        }, this);
+        eventMulticaster.addVisibleAreaListener(new VisibleAreaListener() {
+            @Override
+            public void visibleAreaChanged(@NotNull VisibleAreaEvent event) {
+                Editor editor = event.getEditor();
+                if (!isPrimarySourceEditor(editor)) {
+                    return;
+                }
+                if (syncCoordinator.getState().isEditorEventSuppressed(System.currentTimeMillis())) {
+                    return;
+                }
+                revealPreviewForEditor(editor, "scroll");
+            }
+        }, this);
+
+        MessageBusConnection editorSelectionConnection = myProject.getMessageBus().connect(this);
+        editorSelectionConnection.subscribe(FileEditorManagerListener.FILE_EDITOR_MANAGER, new FileEditorManagerListener() {
+            @Override
+            public void selectionChanged(@NotNull FileEditorManagerEvent event) {
+                if (event.getNewFile() != null && !myFile.equals(event.getNewFile())) {
+                    return;
+                }
+                if (event.getNewEditor() == MarkdownPreviewFileEditor.this) {
+                    scheduleContentSync("activation");
+                    Editor editor = FileEditorManager.getInstance(myProject).getSelectedTextEditor();
+                    if (editor != null && editor.getDocument() == myDocument) {
+                        revealPreviewForEditor(editor, "activation");
+                    }
+                    return;
+                }
+                if (event.getNewEditor() instanceof com.intellij.openapi.fileEditor.TextEditor) {
+                    int targetLine = syncCoordinator.getState().resolveSourceActivationTargetLine();
+                    if (targetLine >= 0) {
+                        revealSourceEditorLine(targetLine);
+                    }
+                }
+            }
+        });
+    }
+
+    /**
+     * 处理来自预览页的统一同步消息。
+     * 当前阶段优先接入 ready / rendered / dirty 三条最关键链路，用于打通内容版本同步和宿主覆盖保护。
+     *
+     * @param message 预览页发回的结构化消息
+     */
+    private void handlePreviewSyncMessage(@NotNull JSONObject message) {
+        String type = message.getString("type");
+        if (StringUtils.isBlank(type)) {
+            return;
+        }
+        switch (type) {
+            case PreviewSyncMessage.TYPE_PREVIEW_READY:
+                dispatchPreviewMessages(syncCoordinator.handlePreviewReady());
+                break;
+            case PreviewSyncMessage.TYPE_PREVIEW_RENDERED:
+                dispatchPreviewMessages(syncCoordinator.handlePreviewRendered(message.getLongValue("contentVersion")));
+                break;
+            case PreviewSyncMessage.TYPE_PREVIEW_DIRTY_CHANGED:
+                syncCoordinator.handlePreviewDirtyChanged(message.getJSONObject("payload").getBooleanValue("dirty"));
+                break;
+            case PreviewSyncMessage.TYPE_PREVIEW_VIEWPORT_CHANGED:
+                handlePreviewViewportChanged(message.getJSONObject("payload"));
+                break;
+            case PreviewSyncMessage.TYPE_PREVIEW_SELECTION_CHANGED:
+                handlePreviewSelectionChanged(message.getJSONObject("payload"));
+                break;
+            default:
+                break;
+        }
+    }
+
+    /**
+     * 安排一次节流后的 Markdown 内容同步。
+     * 该同步会刷新协调器中的当前 Markdown 版本，并在页面 ready 且非脏状态时向预览页推送 applyMarkdown。
+     *
+     * @param reason 触发原因，用于调试和后续扩展时识别入口
+     */
+    private void scheduleContentSync(@NotNull String reason) {
+        contentSyncAlarm.cancelAllRequests();
+        contentSyncAlarm.addRequest(() -> {
+            dispatchPreviewMessages(syncCoordinator.updateDocument(myDocument.getText(), myDocument.getModificationStamp()));
+        }, "activation".equals(reason) ? 0 : 120);
+    }
+
+    /**
+     * 将给定源码编辑器的当前位置同步到预览页。
+     * 当前实现先用逻辑行号 + 可视区相对比例形成最小联动闭环，后续再叠加更精细的顶部/底部对齐策略。
+     *
+     * @param editor 当前参与联动的源码编辑器
+     * @param reason 触发原因，例如 caret、scroll、activation
+     */
+    private void revealPreviewForEditor(@NotNull Editor editor, @NotNull String reason) {
+        EditorViewportSyncSupport.ViewportAnchor viewportAnchor = resolveEditorViewportAnchor(editor, reason);
+        int line = viewportAnchor.getLine();
+        double topRatio = calculateEditorTopRatio(editor, line);
+        long now = System.currentTimeMillis();
+        if (!"activation".equals(reason) && syncCoordinator.getState().shouldSkipDuplicatedEditorReveal(line, topRatio, now)) {
+            return;
+        }
+        syncCoordinator.getState().updateEditorAnchor(line, topRatio);
+        syncCoordinator.getState().recordEditorRevealDispatch(line, topRatio, now);
+        syncCoordinator.getState().suppressPreviewEventsUntil(now + EDITOR_TO_PREVIEW_SUPPRESS_MS);
+        dispatchPreviewMessages(syncCoordinator.requestRevealSourceLine(line, topRatio, reason));
+    }
+
+    /**
+     * 解析当前源码编辑器在本次事件下应同步到预览页的语义锚点。
+     * 光标事件使用 caret 行；滚动事件按顶部/中线/底部策略取锚点，减少 `sv` 模式和长文档中的跳动感。
+     *
+     * @param editor 当前参与联动的源码编辑器
+     * @param reason 触发原因，例如 caret、scroll、activation
+     * @return 当前事件应使用的视口语义锚点
+     */
+    @NotNull
+    private EditorViewportSyncSupport.ViewportAnchor resolveEditorViewportAnchor(@NotNull Editor editor, @NotNull String reason) {
+        Rectangle visibleArea = editor.getScrollingModel().getVisibleArea();
+        int topLine = editor.xyToLogicalPosition(new Point(visibleArea.x, visibleArea.y)).line;
+        int bottomLine = editor.xyToLogicalPosition(new Point(visibleArea.x, Math.max(visibleArea.y, visibleArea.y + Math.max(visibleArea.height - 1, 0)))).line;
+        int middleLine = editor.xyToLogicalPosition(new Point(visibleArea.x, visibleArea.y + Math.max(visibleArea.height / 2, 0))).line;
+        int caretLine = editor.getCaretModel().getLogicalPosition().line;
+        return EditorViewportSyncSupport.resolveAnchor(
+                reason,
+                caretLine,
+                topLine,
+                bottomLine,
+                middleLine,
+                editor.getDocument().getLineCount()
+        );
+    }
+
+    /**
+     * 计算指定源码逻辑行在当前可视区中的相对高度比例。
+     * 该比例用于让预览页尽量以与源码编辑器一致的视口语义位置显示目标内容。
+     *
+     * @param editor 当前源码编辑器
+     * @param line   需要换算的逻辑行号
+     * @return 0 到 1 之间的相对比例；若当前可视区高度无效，则返回 0
+     */
+    private double calculateEditorTopRatio(@NotNull Editor editor, int line) {
+        Rectangle visibleArea = editor.getScrollingModel().getVisibleArea();
+        if (visibleArea.height <= 0) {
+            return 0d;
+        }
+        Point linePoint = editor.logicalPositionToXY(new com.intellij.openapi.editor.LogicalPosition(Math.max(line, 0), 0));
+        double ratio = (linePoint.y - visibleArea.y) / (double) visibleArea.height;
+        if (ratio < 0d) {
+            return 0d;
+        }
+        if (ratio > 1d) {
+            return 1d;
+        }
+        return ratio;
+    }
+
+    /**
+     * 判断给定编辑器是否是当前文件在当前项目中的主源码编辑器事件来源。
+     * 这里先按“同项目 + 同文档 + 当前选中文本编辑器”收敛，避免其他文件或后台编辑器污染联动状态。
+     *
+     * @param editor 待判断的编辑器
+     * @return {@code true} 表示该编辑器事件可参与当前预览联动
+     */
+    private boolean isPrimarySourceEditor(@Nullable Editor editor) {
+        if (editor == null || editor.isDisposed()) {
+            return false;
+        }
+        if (editor.getProject() != myProject || editor.getDocument() != myDocument) {
+            return false;
+        }
+        return editor == FileEditorManager.getInstance(myProject).getSelectedTextEditor();
+    }
+
+    /**
+     * 将协调器产出的结构化消息逐条发送给当前预览页。
+     *
+     * @param messages 待发送的消息列表
+     */
+    private void dispatchPreviewMessages(@NotNull java.util.List<PreviewSyncMessage> messages) {
+        if (myPanel == null || messages.isEmpty()) {
+            return;
+        }
+        for (PreviewSyncMessage message : messages) {
+            myPanel.sendPreviewSyncMessage(message);
+        }
+    }
+
+    /**
+     * 将源码编辑器定位到指定逻辑行。
+     * 当前实现先恢复到该行附近，后续再根据预览选区范围补充更精细的区间可见性对齐。
+     *
+     * @param line 目标逻辑行号
+     */
+    private void revealSourceEditorLine(int line) {
+        syncCoordinator.getState().suppressEditorEventsUntil(System.currentTimeMillis() + PREVIEW_TO_EDITOR_SUPPRESS_MS);
+        FileEditorManager.getInstance(myProject).openTextEditor(
+                new OpenFileDescriptor(myProject, myFile, Math.max(line, 0), 0).setUseCurrentWindow(true),
+                true
+        );
+    }
+
+    /**
+     * 处理预览页滚动后回写的源码锚点。
+     * 当前阶段优先恢复到对应逻辑行附近，并更新宿主状态中的最近预览锚点。
+     *
+     * @param payload 预览页回传的结构化 payload
+     */
+    private void handlePreviewViewportChanged(@Nullable JSONObject payload) {
+        if (payload == null || syncCoordinator.getState().isPreviewEventSuppressed(System.currentTimeMillis())) {
+            return;
+        }
+        int anchorLine = payload.getIntValue("anchorLine");
+        syncCoordinator.getState().updatePreviewAnchor(anchorLine, payload.getString("sourceId"));
+        Editor selectedEditor = FileEditorManager.getInstance(myProject).getSelectedTextEditor();
+        if (selectedEditor != null && selectedEditor.getDocument() == myDocument) {
+            revealSourceEditorLine(anchorLine);
+        }
+    }
+
+    /**
+     * 处理预览页选区变化回写。
+     * 当前实现先记录选区的源码行范围，并在源码编辑器处于当前活动态时恢复到选区起始行附近。
+     *
+     * @param payload 预览页回传的结构化 payload
+     */
+    private void handlePreviewSelectionChanged(@Nullable JSONObject payload) {
+        if (payload == null || syncCoordinator.getState().isPreviewEventSuppressed(System.currentTimeMillis())) {
+            return;
+        }
+        syncCoordinator.getState().updatePreviewSelection(
+                payload.getIntValue("startLine"),
+                payload.getIntValue("endLine"),
+                payload.getString("selectedTextPreview")
+        );
+        Editor selectedEditor = FileEditorManager.getInstance(myProject).getSelectedTextEditor();
+        if (selectedEditor != null && selectedEditor.getDocument() == myDocument) {
+            revealSourceEditorLine(payload.getIntValue("startLine"));
+        }
     }
 
     /**

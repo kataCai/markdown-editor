@@ -87,7 +87,23 @@
     const darcula = "{{darcula}}" === "true";
     const previewToolbarVisible = "{{previewToolbarVisible}}" === "true";
     const previewEditable = "{{previewEditable}}" === "true";
+    const currentFilePath = decodeURIComponent("{{filePath}}");
     window.previewEditable = previewEditable;
+    const previewSyncState = {
+        currentFilePath: currentFilePath,
+        lastAppliedContentVersion: 0,
+        lastRenderedContentVersion: 0,
+        applyingMarkdown: false,
+        dirty: false,
+        totalMarkdownLineCount: 1,
+        blockMappings: [],
+        previewScrollListenerBound: false,
+        previewSelectionListenerBound: false,
+        lastViewportAnchorLine: -1,
+        suppressScrollEventUntil: 0,
+        viewportThrottleTimer: 0,
+        selectionThrottleTimer: 0
+    };
 
     window.onload = function () {
         if (userTemplate) {
@@ -150,6 +166,7 @@
                 fileValue = md;
                 syncedTip(true, data)
                 saveTime = Date.now() + 5000;
+                setPreviewDirtyState(false, "user");
             }
         }).fail(function () {
             vditor.tip("Save file request error", 0);
@@ -165,6 +182,8 @@
                 vditor.setValue(data);
                 fileValue = vditor.getValue();
                 syncedTip(true, data)
+                setPreviewDirtyState(false, "programmatic");
+                schedulePreviewSyncArtifactsRebuild("editFocus");
             }
         }).fail(function () {
             vditor.tip("Get file request error", 0);
@@ -175,7 +194,11 @@
         if (!window.previewEditable) {
             return;
         }
+        if (previewSyncState.applyingMarkdown) {
+            return;
+        }
         syncedTip(false, md)
+        setPreviewDirtyState(md !== fileValue, "user");
     }
 
     function initValue() {
@@ -232,6 +255,38 @@
     }
 
     /**
+     * 统一构造并发送预览页同步消息。
+     * 页面侧所有 ready、rendered、dirty、viewport 和 selection 事件都通过同一 JSON 通道回传宿主。
+     */
+    function emitPreviewSyncMessage(type, payload, source, contentVersion) {
+        if (typeof window.previewSyncBridge !== "function") {
+            return;
+        }
+        const message = {
+            type: type,
+            filePath: previewSyncState.currentFilePath,
+            contentVersion: typeof contentVersion === "number" ? contentVersion : previewSyncState.lastRenderedContentVersion,
+            timestamp: Date.now(),
+            source: source || "programmatic",
+            payload: payload || {}
+        };
+        window.previewSyncBridge(JSON.stringify(message));
+    }
+
+    /**
+     * 维护预览页本地脏状态，并在状态变化时回传宿主。
+     * 宿主据此在预览页未保存本地编辑期间暂停主动覆盖内容，避免双端编辑冲突。
+     */
+    function setPreviewDirtyState(dirty, source) {
+        const nextDirty = !!dirty;
+        if (previewSyncState.dirty === nextDirty) {
+            return;
+        }
+        previewSyncState.dirty = nextDirty;
+        emitPreviewSyncMessage("previewDirtyChanged", {dirty: nextDirty}, source || "programmatic");
+    }
+
+    /**
      * 获取当前 Vditor 模式对应的可编辑节点。
      * 只读态需要对当前模式重新施加 contenteditable 和视觉控制。
      */
@@ -245,6 +300,465 @@
             return null;
         }
         return currentEditor.element || null;
+    }
+
+    /**
+     * 获取当前模式下实际参与滚动的预览容器。
+     * 当前项目在三种模式下都以内层编辑容器作为滚动主体，不能直接假设是 window 滚动。
+     */
+    function getPreviewScrollContainer() {
+        return getCurrentModeElement();
+    }
+
+    /**
+     * 获取当前模式下可用于建立源码锚点映射的块级 DOM 节点列表。
+     * `wysiwyg` 和 `ir` 模式天然具备顶层块节点；`sv` 模式先退化为整个源码容器一个大块，由按行估算滚动兜底。
+     */
+    function getCurrentModeBlockElements() {
+        const currentModeElement = getCurrentModeElement();
+        if (!currentModeElement || !vditor || !vditor.vditor) {
+            return [];
+        }
+        const currentMode = vditor.vditor.currentMode;
+        if (currentMode === "sv") {
+            const wholeSourceElement = currentModeElement.querySelector("[data-block]") || currentModeElement;
+            return wholeSourceElement ? [wholeSourceElement] : [];
+        }
+        return Array.from(currentModeElement.children).filter(function (element) {
+            return element.nodeType === Node.ELEMENT_NODE;
+        });
+    }
+
+    function isBlankMarkdownLine(line) {
+        return /^\s*$/.test(line);
+    }
+
+    function isFenceStart(line) {
+        const match = line.match(/^ {0,3}(`{3,}|~{3,})/);
+        if (!match) {
+            return null;
+        }
+        return match[1];
+    }
+
+    function isHeadingLine(line) {
+        return /^ {0,3}#{1,6}\s+/.test(line);
+    }
+
+    function isHorizontalRuleLine(line) {
+        return /^ {0,3}(?:([-*_])\s*){3,}$/.test(line);
+    }
+
+    function isTableDelimiterLine(line) {
+        return /^\s*\|?(?:\s*:?-+:?\s*\|)+\s*:?-+:?\s*\|?\s*$/.test(line);
+    }
+
+    function looksLikeTableHeaderLine(line) {
+        return /\|/.test(line);
+    }
+
+    function isBlockquoteLine(line) {
+        return /^ {0,3}> ?/.test(line);
+    }
+
+    function isListStartLine(line) {
+        return /^ {0,3}(?:[*+-]|\d+[.)])\s+/.test(line);
+    }
+
+    /**
+     * 基于 Markdown 原文做轻量块扫描，生成顶层块的源码行范围。
+     * 这里不追求完整语法树级别精度，而是优先为滚动联动提供稳定、顺序一致的块级行号锚点。
+     */
+    function parseMarkdownBlocks(markdown) {
+        const lines = markdown.split(/\r\n|\r|\n/);
+        const blocks = [];
+        let lineIndex = 0;
+        while (lineIndex < lines.length) {
+            if (isBlankMarkdownLine(lines[lineIndex])) {
+                lineIndex += 1;
+                continue;
+            }
+
+            const fenceMarker = isFenceStart(lines[lineIndex]);
+            if (fenceMarker) {
+                const blockStart = lineIndex;
+                lineIndex += 1;
+                while (lineIndex < lines.length && !new RegExp("^ {0,3}" + fenceMarker[0] + "{" + fenceMarker.length + ",}\\s*$").test(lines[lineIndex])) {
+                    lineIndex += 1;
+                }
+                if (lineIndex < lines.length) {
+                    lineIndex += 1;
+                }
+                blocks.push({startLine: blockStart, endLine: Math.max(blockStart, lineIndex - 1)});
+                continue;
+            }
+
+            if (isHeadingLine(lines[lineIndex]) || isHorizontalRuleLine(lines[lineIndex])) {
+                blocks.push({startLine: lineIndex, endLine: lineIndex});
+                lineIndex += 1;
+                continue;
+            }
+
+            if (lineIndex + 1 < lines.length && looksLikeTableHeaderLine(lines[lineIndex]) && isTableDelimiterLine(lines[lineIndex + 1])) {
+                const blockStart = lineIndex;
+                lineIndex += 2;
+                while (lineIndex < lines.length && /\|/.test(lines[lineIndex]) && !isBlankMarkdownLine(lines[lineIndex])) {
+                    lineIndex += 1;
+                }
+                blocks.push({startLine: blockStart, endLine: Math.max(blockStart, lineIndex - 1)});
+                continue;
+            }
+
+            if (isBlockquoteLine(lines[lineIndex])) {
+                const blockStart = lineIndex;
+                lineIndex += 1;
+                while (lineIndex < lines.length) {
+                    if (isBlankMarkdownLine(lines[lineIndex])) {
+                        if (lineIndex + 1 < lines.length && isBlockquoteLine(lines[lineIndex + 1])) {
+                            lineIndex += 1;
+                            continue;
+                        }
+                        break;
+                    }
+                    if (!isBlockquoteLine(lines[lineIndex])) {
+                        break;
+                    }
+                    lineIndex += 1;
+                }
+                blocks.push({startLine: blockStart, endLine: Math.max(blockStart, lineIndex - 1)});
+                continue;
+            }
+
+            if (isListStartLine(lines[lineIndex])) {
+                const blockStart = lineIndex;
+                lineIndex += 1;
+                while (lineIndex < lines.length) {
+                    if (isBlankMarkdownLine(lines[lineIndex])) {
+                        break;
+                    }
+                    if (isListStartLine(lines[lineIndex]) || /^ {2,}\S/.test(lines[lineIndex])) {
+                        lineIndex += 1;
+                        continue;
+                    }
+                    if (isFenceStart(lines[lineIndex])) {
+                        break;
+                    }
+                    lineIndex += 1;
+                }
+                blocks.push({startLine: blockStart, endLine: Math.max(blockStart, lineIndex - 1)});
+                continue;
+            }
+
+            const blockStart = lineIndex;
+            lineIndex += 1;
+            while (lineIndex < lines.length && !isBlankMarkdownLine(lines[lineIndex])) {
+                if (isFenceStart(lines[lineIndex]) || isHeadingLine(lines[lineIndex]) || isHorizontalRuleLine(lines[lineIndex]) ||
+                    isBlockquoteLine(lines[lineIndex]) || isListStartLine(lines[lineIndex])) {
+                    break;
+                }
+                if (lineIndex + 1 < lines.length && looksLikeTableHeaderLine(lines[lineIndex]) && isTableDelimiterLine(lines[lineIndex + 1])) {
+                    break;
+                }
+                lineIndex += 1;
+            }
+            blocks.push({startLine: blockStart, endLine: Math.max(blockStart, lineIndex - 1)});
+        }
+        return blocks;
+    }
+
+    function measureElementTop(container, element) {
+        const containerRect = container.getBoundingClientRect();
+        const elementRect = element.getBoundingClientRect();
+        return container.scrollTop + elementRect.top - containerRect.top;
+    }
+
+    function resolveFallbackLineHeight(container) {
+        if (!container) {
+            return 24;
+        }
+        const computedStyle = window.getComputedStyle(container);
+        const lineHeight = parseFloat(computedStyle.lineHeight);
+        if (!Number.isNaN(lineHeight) && lineHeight > 0) {
+            return lineHeight;
+        }
+        return 24;
+    }
+
+    /**
+     * `sv` 模式下优先使用“可滚动总高度 / Markdown 总行数”估算每行纵向跨度。
+     * 这样比单纯依赖 CSS 行高更贴近真实滚动距离，能减少长文档中的累计误差。
+     */
+    function resolveSvLineHeight(container) {
+        if (!container) {
+            return 24;
+        }
+        const fallbackLineHeight = resolveFallbackLineHeight(container);
+        const totalLineCount = Math.max(1, previewSyncState.totalMarkdownLineCount || 1);
+        const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+        if (totalLineCount <= 1 || maxScrollTop <= 0) {
+            return fallbackLineHeight;
+        }
+        return Math.max(fallbackLineHeight, maxScrollTop / Math.max(1, totalLineCount - 1));
+    }
+
+    function resolveContainerPaddingTop(container) {
+        if (!container) {
+            return 0;
+        }
+        const computedStyle = window.getComputedStyle(container);
+        const paddingTop = parseFloat(computedStyle.paddingTop);
+        return Number.isNaN(paddingTop) ? 0 : Math.max(0, paddingTop);
+    }
+
+    /**
+     * 根据当前模式和 Markdown 原文重建块级源码锚点与滚动映射。
+     * `wysiwyg/ir` 走块级 DOM 顺序绑定；`sv` 先退化为按行高估算滚动，不阻塞整体联动闭环。
+     */
+    function rebuildPreviewSyncArtifacts() {
+        if (!vditor || !vditor.vditor) {
+            return;
+        }
+        const currentMode = vditor.vditor.currentMode;
+        const currentModeElement = getCurrentModeElement();
+        const blockElements = getCurrentModeBlockElements();
+        const blocks = parseMarkdownBlocks(vditor.getValue());
+        previewSyncState.totalMarkdownLineCount = Math.max(1, vditor.getValue().split(/\r\n|\r|\n/).length);
+        previewSyncState.blockMappings = [];
+        if (!currentModeElement) {
+            return;
+        }
+        if (currentMode === "sv") {
+            if (blockElements.length > 0) {
+                blockElements[0].dataset.sourceId = "source-block-all";
+                blockElements[0].dataset.sourceLineStart = "0";
+                blockElements[0].dataset.sourceLineEnd = String(Math.max(0, blocks.length === 0 ? 0 : blocks[blocks.length - 1].endLine));
+            }
+            return;
+        }
+        const blockCount = Math.min(blocks.length, blockElements.length);
+        for (let index = 0; index < blockCount; index += 1) {
+            const block = blocks[index];
+            const element = blockElements[index];
+            const sourceId = "source-block-" + index;
+            element.dataset.sourceId = sourceId;
+            element.dataset.sourceLineStart = String(block.startLine);
+            element.dataset.sourceLineEnd = String(block.endLine);
+            previewSyncState.blockMappings.push({
+                sourceId: sourceId,
+                startLine: block.startLine,
+                endLine: block.endLine,
+                element: element
+            });
+        }
+    }
+
+    function schedulePreviewSyncArtifactsRebuild(reason) {
+        setTimeout(function () {
+            rebuildPreviewSyncArtifacts();
+        }, 0);
+    }
+
+    function resolveScrollTopForLine(line, topRatio) {
+        const container = getPreviewScrollContainer();
+        if (!container) {
+            return null;
+        }
+        const safeTopRatio = typeof topRatio === "number" ? Math.max(0, Math.min(1, topRatio)) : 0;
+        if (!vditor || !vditor.vditor || vditor.vditor.currentMode === "sv") {
+            const lineHeight = resolveSvLineHeight(container);
+            const paddingTop = resolveContainerPaddingTop(container);
+            const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+            const targetScrollTop = paddingTop + line * lineHeight - container.clientHeight * safeTopRatio;
+            return Math.max(0, Math.min(maxScrollTop, targetScrollTop));
+        }
+        if (previewSyncState.blockMappings.length === 0) {
+            return 0;
+        }
+        let currentBlock = previewSyncState.blockMappings[0];
+        for (let index = 0; index < previewSyncState.blockMappings.length; index += 1) {
+            const block = previewSyncState.blockMappings[index];
+            if (line < block.startLine) {
+                break;
+            }
+            currentBlock = block;
+            if (line <= block.endLine) {
+                break;
+            }
+        }
+        const currentIndex = previewSyncState.blockMappings.indexOf(currentBlock);
+        const currentY = measureElementTop(container, currentBlock.element);
+        const nextBlock = currentIndex + 1 < previewSyncState.blockMappings.length ? previewSyncState.blockMappings[currentIndex + 1] : null;
+        const nextY = nextBlock ? measureElementTop(container, nextBlock.element) : currentY + Math.max(currentBlock.element.offsetHeight, resolveFallbackLineHeight(container));
+        const blockLineCount = Math.max(1, currentBlock.endLine - currentBlock.startLine + 1);
+        const blockRatio = Math.max(0, Math.min(1, (line - currentBlock.startLine) / blockLineCount));
+        const targetY = currentY + (nextY - currentY) * blockRatio;
+        return Math.max(0, targetY - container.clientHeight * safeTopRatio);
+    }
+
+    /**
+     * 按源码逻辑行驱动当前预览模式滚动到对应语义位置附近。
+     * 这里优先使用块级锚点映射；`sv` 模式退化为按行高估算，保证至少具备基础联动能力。
+     */
+    function revealSourceLine(line, topRatio, reason) {
+        const container = getPreviewScrollContainer();
+        const targetScrollTop = resolveScrollTopForLine(line, topRatio);
+        if (!container || targetScrollTop === null) {
+            return;
+        }
+        previewSyncState.suppressScrollEventUntil = Date.now() + 280;
+        container.scrollTop = targetScrollTop;
+    }
+
+    function findSourceAnchorElement(node) {
+        let currentNode = node;
+        while (currentNode) {
+            if (currentNode.nodeType === Node.ELEMENT_NODE && currentNode.dataset && currentNode.dataset.sourceLineStart) {
+                return currentNode;
+            }
+            currentNode = currentNode.parentNode;
+        }
+        return null;
+    }
+
+    function collectViewportAnchor() {
+        const container = getPreviewScrollContainer();
+        if (!container) {
+            return null;
+        }
+        if (!vditor || !vditor.vditor || vditor.vditor.currentMode === "sv") {
+            const lineHeight = resolveSvLineHeight(container);
+            const paddingTop = resolveContainerPaddingTop(container);
+            const maxLine = Math.max(0, (previewSyncState.totalMarkdownLineCount || 1) - 1);
+            return {
+                anchorLine: Math.max(0, Math.min(maxLine, Math.round((container.scrollTop + container.clientHeight / 2 - paddingTop) / lineHeight))),
+                sourceId: null
+            };
+        }
+        if (previewSyncState.blockMappings.length === 0) {
+            return null;
+        }
+        const centerY = container.scrollTop + container.clientHeight / 2;
+        let currentBlock = previewSyncState.blockMappings[0];
+        for (let index = 0; index < previewSyncState.blockMappings.length; index += 1) {
+            const block = previewSyncState.blockMappings[index];
+            const blockY = measureElementTop(container, block.element);
+            if (centerY >= blockY) {
+                currentBlock = block;
+                continue;
+            }
+            break;
+        }
+        const currentIndex = previewSyncState.blockMappings.indexOf(currentBlock);
+        const currentY = measureElementTop(container, currentBlock.element);
+        const nextBlock = currentIndex + 1 < previewSyncState.blockMappings.length ? previewSyncState.blockMappings[currentIndex + 1] : null;
+        const nextY = nextBlock ? measureElementTop(container, nextBlock.element) : currentY + Math.max(currentBlock.element.offsetHeight, resolveFallbackLineHeight(container));
+        const blockHeight = Math.max(1, nextY - currentY);
+        const blockRatio = Math.max(0, Math.min(1, (centerY - currentY) / blockHeight));
+        const blockLineCount = Math.max(1, currentBlock.endLine - currentBlock.startLine + 1);
+        return {
+            anchorLine: Math.max(currentBlock.startLine, Math.round(currentBlock.startLine + (blockLineCount - 1) * blockRatio)),
+            sourceId: currentBlock.sourceId
+        };
+    }
+
+    function emitPreviewViewportChanged() {
+        if (Date.now() < previewSyncState.suppressScrollEventUntil) {
+            return;
+        }
+        const anchor = collectViewportAnchor();
+        if (!anchor || anchor.anchorLine === previewSyncState.lastViewportAnchorLine) {
+            return;
+        }
+        previewSyncState.lastViewportAnchorLine = anchor.anchorLine;
+        emitPreviewSyncMessage("previewViewportChanged", {
+            anchorLine: anchor.anchorLine,
+            sourceId: anchor.sourceId
+        }, "user");
+    }
+
+    function emitPreviewSelectionChanged() {
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+            return;
+        }
+        const previewRootElement = getPreviewRootElement();
+        const startContainer = selection.getRangeAt(0).startContainer;
+        const endContainer = selection.getRangeAt(0).endContainer;
+        if (!previewRootElement.contains(startContainer) || !previewRootElement.contains(endContainer)) {
+            return;
+        }
+        const startAnchor = findSourceAnchorElement(startContainer);
+        const endAnchor = findSourceAnchorElement(endContainer);
+        if (!startAnchor || !endAnchor) {
+            return;
+        }
+        emitPreviewSyncMessage("previewSelectionChanged", {
+            startLine: parseInt(startAnchor.dataset.sourceLineStart, 10),
+            endLine: parseInt(endAnchor.dataset.sourceLineEnd, 10),
+            sourceId: startAnchor.dataset.sourceId || null,
+            selectedTextPreview: selection.toString().slice(0, 120)
+        }, "user");
+    }
+
+    function bindPreviewSyncListeners() {
+        if (!previewSyncState.previewScrollListenerBound) {
+            previewSyncState.previewScrollListenerBound = true;
+            document.addEventListener("scroll", function (event) {
+                const container = getPreviewScrollContainer();
+                if (!container || event.target !== container) {
+                    return;
+                }
+                clearTimeout(previewSyncState.viewportThrottleTimer);
+                previewSyncState.viewportThrottleTimer = setTimeout(function () {
+                    emitPreviewViewportChanged();
+                }, 80);
+            }, true);
+        }
+        if (!previewSyncState.previewSelectionListenerBound) {
+            previewSyncState.previewSelectionListenerBound = true;
+            document.addEventListener("selectionchange", function () {
+                clearTimeout(previewSyncState.selectionThrottleTimer);
+                previewSyncState.selectionThrottleTimer = setTimeout(function () {
+                    emitPreviewSelectionChanged();
+                }, 80);
+            });
+        }
+    }
+
+    function schedulePreviewRendered(contentVersion) {
+        setTimeout(function () {
+            schedulePreviewSyncArtifactsRebuild("rendered");
+            previewSyncState.lastRenderedContentVersion = contentVersion;
+            emitPreviewSyncMessage("previewRendered", {}, "programmatic", contentVersion);
+        }, 0);
+    }
+
+    function applyMarkdownFromHost(message) {
+        if (!message || !message.payload) {
+            return;
+        }
+        const markdown = typeof message.payload.markdown === "string" ? message.payload.markdown : "";
+        const contentVersion = typeof message.contentVersion === "number" ? message.contentVersion : 0;
+        if (previewSyncState.dirty) {
+            return;
+        }
+        previewSyncState.applyingMarkdown = true;
+        try {
+            if (vditor.getValue() !== markdown) {
+                vditor.setValue(markdown);
+            }
+            fileValue = markdown;
+            initError = false;
+            previewSyncState.lastAppliedContentVersion = contentVersion;
+            syncedTip(true, markdown);
+            setPreviewDirtyState(false, "programmatic");
+            window.setPreviewEditable(window.previewEditable);
+            schedulePreviewRendered(contentVersion);
+        } finally {
+            setTimeout(function () {
+                previewSyncState.applyingMarkdown = false;
+            }, 0);
+        }
     }
 
     /**
@@ -293,6 +807,7 @@
     function refreshPreviewEditableState() {
         setTimeout(function () {
             window.setPreviewEditable(window.previewEditable);
+            schedulePreviewSyncArtifactsRebuild("editModeChanged");
         }, 0);
     }
 
@@ -380,6 +895,32 @@
         }
         applyCurrentModeEditableState(editable);
         syncPreviewReadonlyClass(editable);
+        schedulePreviewSyncArtifactsRebuild("editableChanged");
+    }
+
+    window.markdownEditorBridge = {
+        handleHostMessage(message) {
+            if (!message) {
+                return;
+            }
+            if (message.filePath && message.filePath !== previewSyncState.currentFilePath) {
+                return;
+            }
+            switch (message.type) {
+                case "applyMarkdown":
+                    applyMarkdownFromHost(message);
+                    break;
+                case "revealSourceLine":
+                    revealSourceLine(
+                        message.payload ? message.payload.line : 0,
+                        message.payload ? message.payload.topRatio : 0,
+                        message.payload ? message.payload.reason : "programmatic"
+                    );
+                    break;
+                default:
+                    break;
+            }
+        }
     }
 
     function exportFile(type) {
@@ -536,9 +1077,13 @@
         after() {
             fileValue = vditor.getValue()
             bindReadonlyInteractionGuards();
+            bindPreviewSyncListeners();
             initToolbarExtensions();
             window.setPreviewToolbarVisible(previewToolbarVisible);
             window.setPreviewEditable(previewEditable);
+            schedulePreviewSyncArtifactsRebuild("after");
+            emitPreviewSyncMessage("previewReady", {}, "activation", previewSyncState.lastAppliedContentVersion);
+            emitPreviewSyncMessage("previewDirtyChanged", {dirty: false}, "programmatic", previewSyncState.lastAppliedContentVersion);
         },
         blur(md) {
             editBlur(md,false)

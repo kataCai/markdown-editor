@@ -1,5 +1,7 @@
 package com.shuzijun.markdown.editor;
 
+import com.alibaba.fastjson.JSON;
+import com.alibaba.fastjson.JSONObject;
 import com.intellij.CommonBundle;
 import com.intellij.ide.*;
 import com.intellij.ide.actions.searcheverywhere.SearchEverywhereManager;
@@ -25,6 +27,7 @@ import com.intellij.ui.jcef.JCEFHtmlPanel;
 import com.intellij.util.io.HttpRequests;
 import com.intellij.util.io.URLUtil;
 import com.intellij.util.ui.UIUtil;
+import com.shuzijun.markdown.editor.sync.PreviewSyncMessage;
 import com.shuzijun.markdown.model.PluginConstant;
 import com.shuzijun.markdown.util.FileUtils;
 import io.netty.handler.codec.http.HttpHeaderNames;
@@ -55,6 +58,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 import java.util.function.Function;
 
 /**
@@ -75,6 +79,7 @@ public class MarkdownHtmlPanel extends JCEFHtmlPanel {
     private final CefRequestHandler requestHandler;
     private final CefLifeSpanHandler lifeSpanHandler;
     private final JBCefJSQuery selectValueJSQuery;
+    private final JBCefJSQuery previewSyncBridgeJSQuery;
 
     private final boolean isFileEditor;
     private final String url;
@@ -86,6 +91,13 @@ public class MarkdownHtmlPanel extends JCEFHtmlPanel {
      * Java 侧的剪切、粘贴 Provider 会读取该状态，避免绕过网页侧 Vditor 的只读控制。
      */
     private volatile boolean previewEditable = false;
+    /**
+     * 预览同步桥回调。
+     * JCEF 页面通过统一 JSON 通道上报 ready、rendered、viewport 和 selection 等事件后，
+     * 这里将其转交给外层编辑器协调器处理。
+     */
+    private Consumer<JSONObject> previewSyncMessageHandler = message -> {
+    };
 
     public MarkdownHtmlPanel(@Nullable String url, Project project, boolean isFileEditor) {
         super(offScreenRendering(isFileEditor), null, null);
@@ -191,6 +203,18 @@ public class MarkdownHtmlPanel extends JCEFHtmlPanel {
             CopyPasteManager.getInstance().setContents(new StringSelection(value));
             return null;
         });
+        previewSyncBridgeJSQuery = JBCefJSQuery.create((JBCefBrowserBase) this);
+        previewSyncBridgeJSQuery.addHandler(value -> {
+            if (StringUtils.isBlank(value)) {
+                return null;
+            }
+            try {
+                previewSyncMessageHandler.accept(JSON.parseObject(value));
+            } catch (Exception e) {
+                LOG.warn("Failed to parse preview sync message: " + value, e);
+            }
+            return null;
+        });
     }
 
     @Override
@@ -230,7 +254,36 @@ public class MarkdownHtmlPanel extends JCEFHtmlPanel {
         getJBCefClient().removeRequestHandler(requestHandler, getCefBrowser());
         getJBCefClient().removeLifeSpanHandler(lifeSpanHandler, getCefBrowser());
         Disposer.dispose(selectValueJSQuery);
+        Disposer.dispose(previewSyncBridgeJSQuery);
         super.dispose();
+    }
+
+    /**
+     * 设置预览同步消息处理器。
+     * 面板本身只负责桥接 JSON 消息，不承担具体的版本推进和编辑器联动决策。
+     *
+     * @param handler 预览同步消息处理器；传入 {@code null} 时退化为空实现
+     */
+    public void setPreviewSyncMessageHandler(@Nullable Consumer<JSONObject> handler) {
+        previewSyncMessageHandler = handler == null ? message -> {
+        } : handler;
+    }
+
+    /**
+     * 向当前预览页发送结构化同步消息。
+     * 统一入口可以避免继续为不同联动场景增加零散的 JavaScript 调用片段。
+     *
+     * @param message 需要发送到页面的结构化同步消息
+     */
+    public void sendPreviewSyncMessage(@NotNull PreviewSyncMessage message) {
+        String messageJson = JSON.toJSONString(message);
+        getCefBrowser().executeJavaScript(
+                "if (window.markdownEditorBridge && window.markdownEditorBridge.handleHostMessage) {" +
+                        "window.markdownEditorBridge.handleHostMessage(" + messageJson + ");" +
+                        "}",
+                getCefBrowser().getURL(),
+                0
+        );
     }
 
     private void openUrl(String frameUrl, String url) {
@@ -356,7 +409,13 @@ public class MarkdownHtmlPanel extends JCEFHtmlPanel {
         String blur = "function jsAddBlur(){\n" +
                 "        vditor.vditor.ir.element.addEventListener('blur',(event) => {event.stopImmediatePropagation();}, {capture: true,once: true});\n" +
                 "    }\n";
-        return savaTime + copy + cut + paste + blur;
+        String previewSyncBridge = "window.previewSyncBridge = function(message){\n" +
+                "        if (!message) {\n" +
+                "            return;\n" +
+                "        }\n" +
+                previewSyncBridgeJSQuery.inject("message") +
+                "    }\n";
+        return savaTime + copy + cut + paste + blur + previewSyncBridge;
     }
 
     public void browserFind(String txt, boolean forward) {

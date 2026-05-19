@@ -51,6 +51,8 @@ import com.intellij.util.messages.MessageBusConnection;
 import com.intellij.util.ui.UIUtil;
 import com.shuzijun.markdown.controller.FileApplicationService;
 import com.shuzijun.markdown.controller.PreviewStaticServer;
+import com.shuzijun.markdown.editor.sync.EditorActivationSyncSupport;
+import com.shuzijun.markdown.editor.sync.EditorActivationTransitionSupport;
 import com.shuzijun.markdown.editor.sync.EditorViewportSyncSupport;
 import com.shuzijun.markdown.editor.sync.PreviewEditorSyncCoordinator;
 import com.shuzijun.markdown.editor.sync.PreviewSyncMessage;
@@ -332,9 +334,28 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
                     return;
                 }
                 if (event.getNewEditor() instanceof com.intellij.openapi.fileEditor.TextEditor) {
+                    boolean shouldRestore = EditorActivationTransitionSupport.shouldRestoreSourceFromPreview(
+                            event.getOldEditor() == MarkdownPreviewFileEditor.this,
+                            true
+                    );
+                    Editor sourceEditor = ((com.intellij.openapi.fileEditor.TextEditor) event.getNewEditor()).getEditor();
+                    if (sourceEditor.getDocument() != myDocument) {
+                        return;
+                    }
+                    if (!shouldRestore) {
+                        debugSync("skip source activation restore: oldEditorIsPreview=%s, newEditor=%s",
+                                event.getOldEditor() == MarkdownPreviewFileEditor.this,
+                                event.getNewEditor().getClass().getSimpleName());
+                        return;
+                    }
                     int targetLine = syncCoordinator.getState().resolveSourceActivationTargetLine();
+                    debugSync("source activation restore target=%s, previewSelectionStart=%s, previewAnchorLine=%s, previewAnchorKind=%s",
+                            targetLine,
+                            syncCoordinator.getState().getPreviewSelectionStartLine(),
+                            syncCoordinator.getState().getPreviewAnchorLine(),
+                            syncCoordinator.getState().getPreviewAnchorKind());
                     if (targetLine >= 0) {
-                        revealSourceEditorLine(targetLine);
+                        revealSourceEditorLine(sourceEditor, targetLine);
                     }
                 }
             }
@@ -367,6 +388,9 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
                 break;
             case PreviewSyncMessage.TYPE_PREVIEW_SELECTION_CHANGED:
                 handlePreviewSelectionChanged(message.getJSONObject("payload"));
+                break;
+            case PreviewSyncMessage.TYPE_PREVIEW_SELECTION_CLEARED:
+                handlePreviewSelectionCleared();
                 break;
             default:
                 break;
@@ -404,6 +428,7 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
         syncCoordinator.getState().updateEditorAnchor(line, topRatio);
         syncCoordinator.getState().recordEditorRevealDispatch(line, topRatio, now);
         syncCoordinator.getState().suppressPreviewEventsUntil(now + EDITOR_TO_PREVIEW_SUPPRESS_MS);
+        debugSync("reveal preview for editor: reason=%s, line=%s, topRatio=%.3f", reason, line, topRatio);
         dispatchPreviewMessages(syncCoordinator.requestRevealSourceLine(line, topRatio, reason));
     }
 
@@ -493,11 +518,52 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
      *
      * @param line 目标逻辑行号
      */
-    private void revealSourceEditorLine(int line) {
-        syncCoordinator.getState().suppressEditorEventsUntil(System.currentTimeMillis() + PREVIEW_TO_EDITOR_SUPPRESS_MS);
+    private void revealSourceEditorLine(@NotNull Editor editor, int line) {
+        long nowMillis = System.currentTimeMillis();
+        if (shouldSkipSourceRestore(editor, line, nowMillis)) {
+            debugSync("skip source restore as no-op: targetLine=%s, visibleTopBottom=%s-%s",
+                    line,
+                    editor.xyToLogicalPosition(new Point(editor.getScrollingModel().getVisibleArea().x, editor.getScrollingModel().getVisibleArea().y)).line,
+                    editor.xyToLogicalPosition(new Point(
+                            editor.getScrollingModel().getVisibleArea().x,
+                            editor.getScrollingModel().getVisibleArea().y + Math.max(editor.getScrollingModel().getVisibleArea().height - 1, 0)
+                    )).line);
+            return;
+        }
+        syncCoordinator.getState().recordSourceRestore(line, nowMillis);
+        syncCoordinator.getState().suppressEditorEventsUntil(nowMillis + PREVIEW_TO_EDITOR_SUPPRESS_MS);
+        debugSync("reveal source editor: targetLine=%s", line);
         FileEditorManager.getInstance(myProject).openTextEditor(
                 new OpenFileDescriptor(myProject, myFile, Math.max(line, 0), 0).setUseCurrentWindow(true),
                 true
+        );
+    }
+
+    /**
+     * 判断本次“切回源码编辑器”的恢复定位是否属于无效恢复。
+     * 当前会拦截两类情况：
+     * 1. 目标行本来就在可视区内，此时再次恢复只会制造抖动；
+     * 2. 极短时间内对同一目标行重复恢复，此时大概率属于激活回声或布局抖动。
+     *
+     * @param editor     当前源码编辑器
+     * @param targetLine 本次准备恢复的目标逻辑行号
+     * @param nowMillis  当前时间戳
+     * @return {@code true} 表示应跳过本次恢复，避免无意义跳动
+     */
+    private boolean shouldSkipSourceRestore(@NotNull Editor editor, int targetLine, long nowMillis) {
+        Rectangle visibleArea = editor.getScrollingModel().getVisibleArea();
+        int topLine = editor.xyToLogicalPosition(new Point(visibleArea.x, visibleArea.y)).line;
+        int bottomLine = editor.xyToLogicalPosition(new Point(
+                visibleArea.x,
+                visibleArea.y + Math.max(visibleArea.height - 1, 0)
+        )).line;
+        return EditorActivationSyncSupport.shouldSkipSourceRestore(
+                topLine,
+                bottomLine,
+                targetLine,
+                syncCoordinator.getState().getLastRestoredSourceLine(),
+                syncCoordinator.getState().getLastRestoredSourceAt(),
+                nowMillis
         );
     }
 
@@ -512,10 +578,18 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
             return;
         }
         int anchorLine = payload.getIntValue("anchorLine");
-        syncCoordinator.getState().updatePreviewAnchor(anchorLine, payload.getString("sourceId"));
+        debugSync("receive preview viewport: anchorLine=%s, sourceId=%s, anchorKind=%s",
+                anchorLine,
+                payload.getString("sourceId"),
+                payload.getString("anchorKind"));
+        syncCoordinator.getState().updatePreviewAnchor(
+                anchorLine,
+                payload.getString("sourceId"),
+                resolvePreviewAnchorKind(payload.getString("anchorKind"))
+        );
         Editor selectedEditor = FileEditorManager.getInstance(myProject).getSelectedTextEditor();
         if (selectedEditor != null && selectedEditor.getDocument() == myDocument) {
-            revealSourceEditorLine(anchorLine);
+            revealSourceEditorLine(selectedEditor, anchorLine);
         }
     }
 
@@ -529,6 +603,15 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
         if (payload == null || syncCoordinator.getState().isPreviewEventSuppressed(System.currentTimeMillis())) {
             return;
         }
+        debugSync("receive preview selection: start=%s, end=%s, text=%s",
+                payload.getIntValue("startLine"),
+                payload.getIntValue("endLine"),
+                payload.getString("selectedTextPreview"));
+        syncCoordinator.getState().updatePreviewAnchor(
+                payload.getIntValue("startLine"),
+                payload.getString("sourceId"),
+                com.shuzijun.markdown.editor.sync.PreviewEditorSyncState.PreviewAnchorKind.USER_SELECTION
+        );
         syncCoordinator.getState().updatePreviewSelection(
                 payload.getIntValue("startLine"),
                 payload.getIntValue("endLine"),
@@ -536,8 +619,55 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
         );
         Editor selectedEditor = FileEditorManager.getInstance(myProject).getSelectedTextEditor();
         if (selectedEditor != null && selectedEditor.getDocument() == myDocument) {
-            revealSourceEditorLine(payload.getIntValue("startLine"));
+            revealSourceEditorLine(selectedEditor, payload.getIntValue("startLine"));
         }
+    }
+
+    /**
+     * 处理预览页显式上报的“选区已清空”事件。
+     * 该事件用于及时清除宿主侧陈旧选区状态，避免后续激活切换始终优先消费历史选区。
+     */
+    private void handlePreviewSelectionCleared() {
+        syncCoordinator.getState().clearPreviewSelection();
+        debugSync("receive preview selection cleared");
+    }
+
+    /**
+     * 将预览页回传的锚点来源字符串映射为宿主侧枚举。
+     * 未知来源默认按用户滚动处理，避免因前后端升级不同步而把正常回写全部拦掉。
+     *
+     * @param anchorKind 预览页回传的锚点来源
+     * @return 宿主侧锚点类型
+     */
+    @NotNull
+    private com.shuzijun.markdown.editor.sync.PreviewEditorSyncState.PreviewAnchorKind resolvePreviewAnchorKind(@Nullable String anchorKind) {
+        if ("NO_SCROLL_SYNTHETIC".equals(anchorKind)) {
+            return com.shuzijun.markdown.editor.sync.PreviewEditorSyncState.PreviewAnchorKind.NO_SCROLL_SYNTHETIC;
+        }
+        if ("PROGRAMMATIC_REVEAL".equals(anchorKind)) {
+            return com.shuzijun.markdown.editor.sync.PreviewEditorSyncState.PreviewAnchorKind.PROGRAMMATIC_REVEAL;
+        }
+        if ("ACTIVATION_SYNC".equals(anchorKind)) {
+            return com.shuzijun.markdown.editor.sync.PreviewEditorSyncState.PreviewAnchorKind.ACTIVATION_SYNC;
+        }
+        if ("USER_SELECTION".equals(anchorKind)) {
+            return com.shuzijun.markdown.editor.sync.PreviewEditorSyncState.PreviewAnchorKind.USER_SELECTION;
+        }
+        return com.shuzijun.markdown.editor.sync.PreviewEditorSyncState.PreviewAnchorKind.USER_SCROLL;
+    }
+
+    /**
+     * 按需输出编辑器/预览联动诊断日志。
+     * 该日志默认关闭，仅在显式打开调试开关时用于排查人工验证中的事件顺序、旧选区滞留和误恢复问题。
+     *
+     * @param format 日志格式串
+     * @param args   日志参数
+     */
+    private void debugSync(@NotNull String format, Object... args) {
+        if (!PropertiesComponent.getInstance().getBoolean(PluginConstant.editorPreviewSyncDebugKey, false)) {
+            return;
+        }
+        LOG.info("[preview-sync] " + String.format(format, args));
     }
 
     /**

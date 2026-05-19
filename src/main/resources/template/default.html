@@ -89,6 +89,31 @@
     const previewEditable = "{{previewEditable}}" === "true";
     const currentFilePath = decodeURIComponent("{{filePath}}");
     window.previewEditable = previewEditable;
+    window.previewSyncDebug = false;
+    /**
+     * 仅在最近确实发生过用户滚动意图时，才允许把预览侧 scroll 解释为 USER_SCROLL。
+     * 这样可以拦住渲染回流、模式切换和程序性 reveal 带来的伪滚动，避免它们污染宿主侧激活恢复状态。
+     */
+    const USER_SCROLL_INTENT_WINDOW_MS = 1200;
+    /**
+     * 仅在最近确实发生过用户选区意图时，才允许把 selectionchange 解释为稳定用户选区。
+     * 这样可以过滤只读切换、DOM 重建和浏览器内部选区调整带来的噪声事件。
+     */
+    const USER_SELECTION_INTENT_WINDOW_MS = 1500;
+    /**
+     * selectionchange 需要在短时间内静默后再上报，避免拖拽选区和 DOM 抖动期间连续把中间态回写给宿主。
+     */
+    const SELECTION_STABILIZE_DELAY_MS = 140;
+    /**
+     * 程序性滚动基线的保护时间窗。
+     * 在这个时间窗内，如果没有新的用户滚动意图，接近程序性 baseline 的 scroll 变化都视为程序性噪声。
+     */
+    const PROGRAMMATIC_SCROLL_GUARD_WINDOW_MS = 1200;
+    /**
+     * 程序性滚动基线的 scrollTop 近似容差。
+     * 允许浏览器布局收敛时出现少量像素级漂移，但不把它误判成新的用户滚动。
+     */
+    const PROGRAMMATIC_SCROLL_TOP_TOLERANCE = 6;
     const previewSyncState = {
         currentFilePath: currentFilePath,
         lastAppliedContentVersion: 0,
@@ -96,14 +121,137 @@
         applyingMarkdown: false,
         dirty: false,
         totalMarkdownLineCount: 1,
+        sourceMapBlocks: [],
         blockMappings: [],
         previewScrollListenerBound: false,
         previewSelectionListenerBound: false,
         lastViewportAnchorLine: -1,
         suppressScrollEventUntil: 0,
+        suppressSyntheticViewportUntil: 0,
+        lastUserScrollIntentAt: 0,
+        lastUserScrollIntentSource: "",
+        lastUserSelectionIntentAt: 0,
+        lastUserSelectionIntentSource: "",
+        lastEmittedSelectionSignature: "",
+        programmaticViewportEpoch: 0,
+        skipNextViewportInProgrammaticEpoch: false,
+        lastProgrammaticScrollTop: null,
+        lastProgrammaticScrollAt: 0,
+        lastProgrammaticScrollReason: "",
         viewportThrottleTimer: 0,
         selectionThrottleTimer: 0
     };
+
+    function debugPreviewSync(message, detail) {
+        if (!window.previewSyncDebug) {
+            return;
+        }
+        if (typeof console !== "undefined" && console.info) {
+            if (typeof detail === "undefined") {
+                console.info("[preview-sync] " + message);
+            } else {
+                console.info("[preview-sync] " + message, detail);
+            }
+        }
+    }
+
+    /**
+     * 记录最近一次可能触发真实预览滚动的用户输入。
+     * 这里只记录“滚轮、触摸、滚动热键、滚动容器按下”等会导致视口变化的动作，不把程序性滚动混进来。
+     */
+    function markUserScrollIntent(source) {
+        previewSyncState.lastUserScrollIntentAt = Date.now();
+        previewSyncState.lastUserScrollIntentSource = source || "unknown";
+        debugPreviewSync("mark user scroll intent", {
+            source: previewSyncState.lastUserScrollIntentSource,
+            at: previewSyncState.lastUserScrollIntentAt
+        });
+    }
+
+    /**
+     * 清理最近一次用户滚动意图。
+     * 当后续滚动明确来自程序性 reveal、模式切换或重新渲染时，需要主动失效旧意图，避免程序性滚动误借用旧用户输入资格上报。
+     */
+    function clearUserScrollIntent(reason) {
+        if (previewSyncState.lastUserScrollIntentAt <= 0) {
+            return;
+        }
+        debugPreviewSync("clear user scroll intent", {
+            reason: reason,
+            source: previewSyncState.lastUserScrollIntentSource,
+            at: previewSyncState.lastUserScrollIntentAt
+        });
+        previewSyncState.lastUserScrollIntentAt = 0;
+        previewSyncState.lastUserScrollIntentSource = "";
+    }
+
+    /**
+     * 判断当前 scroll 事件是否仍可被视为“紧随真实用户输入之后”的滚动。
+     * 超过短时间窗后就不再承认这次资格，防止布局稳定过程里迟到的程序性滚动混入 USER_SCROLL。
+     */
+    function hasRecentUserScrollIntent(now) {
+        return previewSyncState.lastUserScrollIntentAt > 0
+            && now - previewSyncState.lastUserScrollIntentAt <= USER_SCROLL_INTENT_WINDOW_MS;
+    }
+
+    /**
+     * 记录最近一次可能触发用户选区变化的输入。
+     * 这里只承认鼠标按下、触摸开始和带 Shift 的导航按键，避免把普通焦点切换误当成真实选区意图。
+     */
+    function markUserSelectionIntent(source) {
+        previewSyncState.lastUserSelectionIntentAt = Date.now();
+        previewSyncState.lastUserSelectionIntentSource = source || "unknown";
+        debugPreviewSync("mark user selection intent", {
+            source: previewSyncState.lastUserSelectionIntentSource,
+            at: previewSyncState.lastUserSelectionIntentAt
+        });
+    }
+
+    /**
+     * 判断当前 selectionchange 是否仍然有资格被视为“紧随真实用户选区输入之后”的稳定选区。
+     */
+    function hasRecentUserSelectionIntent(now) {
+        return previewSyncState.lastUserSelectionIntentAt > 0
+            && now - previewSyncState.lastUserSelectionIntentAt <= USER_SELECTION_INTENT_WINDOW_MS;
+    }
+
+    /**
+     * 进入新一轮程序性滚动 epoch，并记录当前程序性滚动基线。
+     * 该 epoch 用于在渲染、模式切换和 reveal 后过滤掉首批非用户滚动事件。
+     */
+    function beginProgrammaticViewportEpoch(reason, explicitScrollTop) {
+        const container = getPreviewScrollContainer();
+        previewSyncState.programmaticViewportEpoch += 1;
+        previewSyncState.skipNextViewportInProgrammaticEpoch = true;
+        previewSyncState.lastProgrammaticScrollAt = Date.now();
+        previewSyncState.lastProgrammaticScrollReason = reason || "programmatic";
+        if (typeof explicitScrollTop === "number") {
+            previewSyncState.lastProgrammaticScrollTop = explicitScrollTop;
+        } else if (container) {
+            previewSyncState.lastProgrammaticScrollTop = container.scrollTop;
+        } else {
+            previewSyncState.lastProgrammaticScrollTop = null;
+        }
+        debugPreviewSync("begin programmatic viewport epoch", {
+            epoch: previewSyncState.programmaticViewportEpoch,
+            reason: previewSyncState.lastProgrammaticScrollReason,
+            scrollTop: previewSyncState.lastProgrammaticScrollTop
+        });
+    }
+
+    /**
+     * 判断当前 scroll 事件是否仍落在程序性滚动基线附近。
+     * 如果是，则优先把它视为布局收敛或程序性滚动的后续噪声，而不是新的用户滚动。
+     */
+    function isNearProgrammaticScrollBaseline(now, container) {
+        if (!container || previewSyncState.lastProgrammaticScrollTop === null) {
+            return false;
+        }
+        if (now - previewSyncState.lastProgrammaticScrollAt > PROGRAMMATIC_SCROLL_GUARD_WINDOW_MS) {
+            return false;
+        }
+        return Math.abs(container.scrollTop - previewSyncState.lastProgrammaticScrollTop) <= PROGRAMMATIC_SCROLL_TOP_TOLERANCE;
+    }
 
     window.onload = function () {
         if (userTemplate) {
@@ -521,7 +669,7 @@
         const currentMode = vditor.vditor.currentMode;
         const currentModeElement = getCurrentModeElement();
         const blockElements = getCurrentModeBlockElements();
-        const blocks = parseMarkdownBlocks(vditor.getValue());
+        const blocks = previewSyncState.sourceMapBlocks.length > 0 ? previewSyncState.sourceMapBlocks : parseMarkdownBlocks(vditor.getValue());
         previewSyncState.totalMarkdownLineCount = Math.max(1, vditor.getValue().split(/\r\n|\r|\n/).length);
         previewSyncState.blockMappings = [];
         if (!currentModeElement) {
@@ -543,12 +691,36 @@
             element.dataset.sourceId = sourceId;
             element.dataset.sourceLineStart = String(block.startLine);
             element.dataset.sourceLineEnd = String(block.endLine);
-            previewSyncState.blockMappings.push({
+            const blockMapping = {
                 sourceId: sourceId,
+                blockType: block.blockType || "GENERIC",
                 startLine: block.startLine,
                 endLine: block.endLine,
+                rowMappings: block.rowMappings || [],
                 element: element
-            });
+            };
+            previewSyncState.blockMappings.push(blockMapping);
+            bindTableRowMappingsIfNeeded(element, blockMapping);
+        }
+    }
+
+    function bindTableRowMappingsIfNeeded(element, blockMapping) {
+        if (!element || !blockMapping || blockMapping.blockType !== "TABLE") {
+            return;
+        }
+        const rowMappings = Array.isArray(blockMapping.rowMappings) ? blockMapping.rowMappings : [];
+        if (rowMappings.length === 0) {
+            return;
+        }
+        const rowElements = Array.from(element.querySelectorAll("thead tr, tbody tr, tr"));
+        const rowCount = Math.min(rowElements.length, rowMappings.length);
+        for (let index = 0; index < rowCount; index += 1) {
+            const rowElement = rowElements[index];
+            const rowMapping = rowMappings[index];
+            rowElement.dataset.sourceId = blockMapping.sourceId + "-row-" + index;
+            rowElement.dataset.sourceLineStart = String(rowMapping.startLine);
+            rowElement.dataset.sourceLineEnd = String(rowMapping.endLine);
+            rowElement.dataset.sourceRowIndex = String(index);
         }
     }
 
@@ -605,6 +777,8 @@
         if (!container || targetScrollTop === null) {
             return;
         }
+        clearUserScrollIntent("revealSourceLine");
+        beginProgrammaticViewportEpoch(reason || "revealSourceLine", targetScrollTop);
         previewSyncState.suppressScrollEventUntil = Date.now() + 280;
         container.scrollTop = targetScrollTop;
     }
@@ -625,13 +799,22 @@
         if (!container) {
             return null;
         }
+        if (container.scrollHeight <= container.clientHeight + 2) {
+            return {
+                anchorLine: previewSyncState.lastViewportAnchorLine,
+                sourceId: null,
+                anchorKind: "NO_SCROLL_SYNTHETIC",
+                suppressEmit: true
+            };
+        }
         if (!vditor || !vditor.vditor || vditor.vditor.currentMode === "sv") {
             const lineHeight = resolveSvLineHeight(container);
             const paddingTop = resolveContainerPaddingTop(container);
             const maxLine = Math.max(0, (previewSyncState.totalMarkdownLineCount || 1) - 1);
             return {
                 anchorLine: Math.max(0, Math.min(maxLine, Math.round((container.scrollTop + container.clientHeight / 2 - paddingTop) / lineHeight))),
-                sourceId: null
+                sourceId: null,
+                anchorKind: "USER_SCROLL"
             };
         }
         if (previewSyncState.blockMappings.length === 0) {
@@ -652,50 +835,163 @@
         const currentY = measureElementTop(container, currentBlock.element);
         const nextBlock = currentIndex + 1 < previewSyncState.blockMappings.length ? previewSyncState.blockMappings[currentIndex + 1] : null;
         const nextY = nextBlock ? measureElementTop(container, nextBlock.element) : currentY + Math.max(currentBlock.element.offsetHeight, resolveFallbackLineHeight(container));
+        if (currentBlock.blockType === "TABLE") {
+            const tableRowAnchor = collectTableViewportAnchor(currentBlock, container, centerY);
+            if (tableRowAnchor) {
+                return tableRowAnchor;
+            }
+        }
         const blockHeight = Math.max(1, nextY - currentY);
         const blockRatio = Math.max(0, Math.min(1, (centerY - currentY) / blockHeight));
         const blockLineCount = Math.max(1, currentBlock.endLine - currentBlock.startLine + 1);
         return {
             anchorLine: Math.max(currentBlock.startLine, Math.round(currentBlock.startLine + (blockLineCount - 1) * blockRatio)),
-            sourceId: currentBlock.sourceId
+            sourceId: currentBlock.sourceId,
+            anchorKind: "USER_SCROLL"
+        };
+    }
+
+    function collectTableViewportAnchor(blockMapping, container, centerY) {
+        if (!blockMapping || !blockMapping.element) {
+            return null;
+        }
+        const rowElements = Array.from(blockMapping.element.querySelectorAll("[data-source-row-index]"));
+        if (rowElements.length === 0) {
+            return null;
+        }
+        let closestRowElement = rowElements[0];
+        let closestDistance = Math.abs(centerY - measureElementTop(container, closestRowElement));
+        rowElements.forEach(function (rowElement) {
+            const distance = Math.abs(centerY - measureElementTop(container, rowElement));
+            if (distance < closestDistance) {
+                closestDistance = distance;
+                closestRowElement = rowElement;
+            }
+        });
+        return {
+            anchorLine: parseInt(closestRowElement.dataset.sourceLineStart, 10),
+            sourceId: closestRowElement.dataset.sourceId || blockMapping.sourceId,
+            anchorKind: "USER_SCROLL"
         };
     }
 
     function emitPreviewViewportChanged() {
-        if (Date.now() < previewSyncState.suppressScrollEventUntil) {
+        const now = Date.now();
+        const container = getPreviewScrollContainer();
+        if (now < previewSyncState.suppressScrollEventUntil) {
+            debugPreviewSync("skip viewport emit by suppressScrollEventUntil");
+            return;
+        }
+        if (now < previewSyncState.suppressSyntheticViewportUntil) {
+            debugPreviewSync("skip viewport emit by suppressSyntheticViewportUntil");
+            return;
+        }
+        if (previewSyncState.skipNextViewportInProgrammaticEpoch) {
+            previewSyncState.skipNextViewportInProgrammaticEpoch = false;
+            debugPreviewSync("skip viewport emit by first programmatic epoch event", {
+                epoch: previewSyncState.programmaticViewportEpoch,
+                reason: previewSyncState.lastProgrammaticScrollReason
+            });
+            return;
+        }
+        if (isNearProgrammaticScrollBaseline(now, container) && !hasRecentUserScrollIntent(now)) {
+            debugPreviewSync("skip viewport emit by programmatic scroll baseline", {
+                epoch: previewSyncState.programmaticViewportEpoch,
+                reason: previewSyncState.lastProgrammaticScrollReason,
+                scrollTop: container ? container.scrollTop : null,
+                baseline: previewSyncState.lastProgrammaticScrollTop
+            });
+            return;
+        }
+        if (!hasRecentUserScrollIntent(now)) {
+            debugPreviewSync("skip viewport emit by missing recent user scroll intent", {
+                lastUserScrollIntentAt: previewSyncState.lastUserScrollIntentAt,
+                lastUserScrollIntentSource: previewSyncState.lastUserScrollIntentSource,
+                now: now
+            });
             return;
         }
         const anchor = collectViewportAnchor();
-        if (!anchor || anchor.anchorLine === previewSyncState.lastViewportAnchorLine) {
+        if (!anchor || anchor.suppressEmit || anchor.anchorLine === previewSyncState.lastViewportAnchorLine) {
+            debugPreviewSync("skip viewport emit by empty/same anchor", anchor);
             return;
         }
         previewSyncState.lastViewportAnchorLine = anchor.anchorLine;
+        debugPreviewSync("emit viewport changed", anchor);
         emitPreviewSyncMessage("previewViewportChanged", {
             anchorLine: anchor.anchorLine,
-            sourceId: anchor.sourceId
+            sourceId: anchor.sourceId,
+            anchorKind: anchor.anchorKind || "USER_SCROLL"
         }, "user");
     }
 
     function emitPreviewSelectionChanged() {
+        const now = Date.now();
         const selection = window.getSelection();
         if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+            debugPreviewSync("emit selection cleared");
+            if (previewSyncState.lastEmittedSelectionSignature !== "__cleared__") {
+                previewSyncState.lastEmittedSelectionSignature = "__cleared__";
+                emitPreviewSyncMessage("previewSelectionCleared", {}, "user");
+            } else {
+                debugPreviewSync("skip selection cleared by duplicate clear");
+            }
+            return;
+        }
+        if (!hasRecentUserSelectionIntent(now)) {
+            debugPreviewSync("skip selection changed by missing recent user selection intent", {
+                lastUserSelectionIntentAt: previewSyncState.lastUserSelectionIntentAt,
+                lastUserSelectionIntentSource: previewSyncState.lastUserSelectionIntentSource,
+                now: now
+            });
             return;
         }
         const previewRootElement = getPreviewRootElement();
         const startContainer = selection.getRangeAt(0).startContainer;
         const endContainer = selection.getRangeAt(0).endContainer;
         if (!previewRootElement.contains(startContainer) || !previewRootElement.contains(endContainer)) {
+            debugPreviewSync("emit selection cleared by out-of-root");
+            if (previewSyncState.lastEmittedSelectionSignature !== "__cleared__") {
+                previewSyncState.lastEmittedSelectionSignature = "__cleared__";
+                emitPreviewSyncMessage("previewSelectionCleared", {}, "user");
+            } else {
+                debugPreviewSync("skip selection cleared by duplicate clear");
+            }
             return;
         }
         const startAnchor = findSourceAnchorElement(startContainer);
         const endAnchor = findSourceAnchorElement(endContainer);
         if (!startAnchor || !endAnchor) {
+            debugPreviewSync("emit selection cleared by missing anchor");
+            if (previewSyncState.lastEmittedSelectionSignature !== "__cleared__") {
+                previewSyncState.lastEmittedSelectionSignature = "__cleared__";
+                emitPreviewSyncMessage("previewSelectionCleared", {}, "user");
+            } else {
+                debugPreviewSync("skip selection cleared by duplicate clear");
+            }
             return;
         }
+        const selectionSignature = [
+            startAnchor.dataset.sourceLineStart,
+            endAnchor.dataset.sourceLineEnd,
+            selection.toString().slice(0, 120)
+        ].join("|");
+        if (selectionSignature === previewSyncState.lastEmittedSelectionSignature) {
+            debugPreviewSync("skip selection changed by duplicate signature", {
+                signature: selectionSignature
+            });
+            return;
+        }
+        previewSyncState.lastEmittedSelectionSignature = selectionSignature;
+        debugPreviewSync("emit selection changed", {
+            startLine: parseInt(startAnchor.dataset.sourceLineStart, 10),
+            endLine: parseInt(endAnchor.dataset.sourceLineEnd, 10)
+        });
         emitPreviewSyncMessage("previewSelectionChanged", {
             startLine: parseInt(startAnchor.dataset.sourceLineStart, 10),
             endLine: parseInt(endAnchor.dataset.sourceLineEnd, 10),
             sourceId: startAnchor.dataset.sourceId || null,
+            anchorKind: "USER_SELECTION",
             selectedTextPreview: selection.toString().slice(0, 120)
         }, "user");
     }
@@ -713,6 +1009,38 @@
                     emitPreviewViewportChanged();
                 }, 80);
             }, true);
+            document.addEventListener("wheel", function () {
+                markUserScrollIntent("wheel");
+            }, {capture: true, passive: true});
+            document.addEventListener("touchmove", function () {
+                markUserScrollIntent("touchmove");
+            }, {capture: true, passive: true});
+            document.addEventListener("keydown", function (event) {
+                if (!event) {
+                    return;
+                }
+                const scrollKeys = ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "];
+                if (scrollKeys.indexOf(event.key) >= 0) {
+                    markUserScrollIntent("keydown:" + event.key);
+                }
+                if (event.shiftKey && ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"].indexOf(event.key) >= 0) {
+                    markUserSelectionIntent("keydown-shift:" + event.key);
+                }
+            }, true);
+            document.addEventListener("mousedown", function (event) {
+                const container = getPreviewScrollContainer();
+                if (!container || !event || event.button !== 0) {
+                    return;
+                }
+                markUserSelectionIntent("mousedown");
+                if (event.target === container) {
+                    markUserScrollIntent("mousedown:container");
+                }
+            }, true);
+            document.addEventListener("touchstart", function () {
+                markUserSelectionIntent("touchstart");
+                markUserScrollIntent("touchstart");
+            }, {capture: true, passive: true});
         }
         if (!previewSyncState.previewSelectionListenerBound) {
             previewSyncState.previewSelectionListenerBound = true;
@@ -720,13 +1048,17 @@
                 clearTimeout(previewSyncState.selectionThrottleTimer);
                 previewSyncState.selectionThrottleTimer = setTimeout(function () {
                     emitPreviewSelectionChanged();
-                }, 80);
+                }, SELECTION_STABILIZE_DELAY_MS);
             });
         }
     }
 
     function schedulePreviewRendered(contentVersion) {
         setTimeout(function () {
+            clearUserScrollIntent("schedulePreviewRendered");
+            beginProgrammaticViewportEpoch("schedulePreviewRendered");
+            previewSyncState.suppressSyntheticViewportUntil = Date.now() + 220;
+            debugPreviewSync("schedule preview rendered", {contentVersion: contentVersion});
             schedulePreviewSyncArtifactsRebuild("rendered");
             previewSyncState.lastRenderedContentVersion = contentVersion;
             emitPreviewSyncMessage("previewRendered", {}, "programmatic", contentVersion);
@@ -739,6 +1071,7 @@
         }
         const markdown = typeof message.payload.markdown === "string" ? message.payload.markdown : "";
         const contentVersion = typeof message.contentVersion === "number" ? message.contentVersion : 0;
+        previewSyncState.sourceMapBlocks = Array.isArray(message.payload.sourceMap) ? message.payload.sourceMap : [];
         if (previewSyncState.dirty) {
             return;
         }
@@ -806,6 +1139,9 @@
      */
     function refreshPreviewEditableState() {
         setTimeout(function () {
+            clearUserScrollIntent("refreshPreviewEditableState");
+            beginProgrammaticViewportEpoch("refreshPreviewEditableState");
+            previewSyncState.suppressSyntheticViewportUntil = Date.now() + 220;
             window.setPreviewEditable(window.previewEditable);
             schedulePreviewSyncArtifactsRebuild("editModeChanged");
         }, 0);
@@ -888,6 +1224,10 @@
         if (!vditor || !vditor.vditor || !vditor.vditor.currentMode) {
             return;
         }
+        clearUserScrollIntent("setPreviewEditable");
+        beginProgrammaticViewportEpoch("setPreviewEditable");
+        previewSyncState.suppressSyntheticViewportUntil = Date.now() + 220;
+        debugPreviewSync("set preview editable", {editable: editable});
         if (editable) {
             vditor.enable();
         } else {

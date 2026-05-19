@@ -1,9 +1,12 @@
 package com.shuzijun.markdown.editor.sync;
 
 import com.alibaba.fastjson.JSON;
+import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
 import org.junit.Assert;
 import org.junit.Test;
+
+import java.util.Collections;
 
 /**
  * 预览同步消息结构测试。
@@ -47,7 +50,15 @@ public class PreviewSyncMessageTest {
                 12L,
                 "programmatic",
                 markdown,
-                "documentChanged"
+                "documentChanged",
+                Collections.singletonList(
+                        new MarkdownSourceMapParser.BlockMapping(
+                                MarkdownSourceMapParser.BlockType.GENERIC,
+                                0,
+                                3,
+                                Collections.emptyList()
+                        )
+                )
         );
 
         String json = JSON.toJSONString(message);
@@ -56,5 +67,8 @@ public class PreviewSyncMessageTest {
         Assert.assertEquals(PreviewSyncMessage.TYPE_APPLY_MARKDOWN, parsed.getString("type"));
         Assert.assertEquals(markdown, parsed.getJSONObject("payload").getString("markdown"));
         Assert.assertEquals("documentChanged", parsed.getJSONObject("payload").getString("reason"));
+        JSONArray sourceMap = parsed.getJSONObject("payload").getJSONArray("sourceMap");
+        Assert.assertEquals(1, sourceMap.size());
+        Assert.assertEquals("GENERIC", sourceMap.getJSONObject(0).getString("blockType"));
     }
 }

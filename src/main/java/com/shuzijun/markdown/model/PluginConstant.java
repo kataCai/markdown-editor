@@ -45,4 +45,10 @@ public class PluginConstant {
      * 默认值由读取方使用 false 控制，表示新打开的预览页默认不可编辑。
      */
     public static final String editorPreviewEditableKey = "markdown.editor.previewEditable";
+
+    /**
+     * Markdown 编辑器与预览联动诊断日志开关。
+     * 该开关仅用于人工排查切换抖动、误对齐和事件回声问题，默认应保持关闭，避免污染常规日志。
+     */
+    public static final String editorPreviewSyncDebugKey = "markdown.editor.previewSyncDebug";
 }

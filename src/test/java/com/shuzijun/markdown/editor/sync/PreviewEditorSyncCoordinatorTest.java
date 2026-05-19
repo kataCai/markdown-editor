@@ -28,6 +28,7 @@ public class PreviewEditorSyncCoordinatorTest {
         Assert.assertEquals(PreviewSyncMessage.TYPE_APPLY_MARKDOWN, messages.get(0).getType());
         Assert.assertEquals(3L, messages.get(0).getContentVersion());
         Assert.assertEquals("# Title\n", messages.get(0).getPayload().getString("markdown"));
+        Assert.assertFalse(messages.get(0).getPayload().getJSONArray("sourceMap").isEmpty());
     }
 
     /**
@@ -68,6 +69,7 @@ public class PreviewEditorSyncCoordinatorTest {
         Assert.assertEquals(PreviewSyncMessage.TYPE_APPLY_MARKDOWN, messages.get(0).getType());
         Assert.assertEquals(2L, messages.get(0).getContentVersion());
         Assert.assertEquals("# Title\n\nnext\n", messages.get(0).getPayload().getString("markdown"));
+        Assert.assertFalse(messages.get(0).getPayload().getJSONArray("sourceMap").isEmpty());
     }
 
     /**

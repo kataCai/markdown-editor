@@ -1,5 +1,6 @@
 package com.shuzijun.markdown.editor.sync;
 
+import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 /**
@@ -25,6 +26,12 @@ public class PreviewEditorSyncState {
      */
     private static final double EDITOR_REVEAL_TOP_RATIO_TOLERANCE = 0.03d;
 
+    /**
+     * 预览输入参与“切回源码”激活恢复的最长有效时间窗。
+     * 这里只允许消费最近一小段时间内产生的预览锚点或预览选区，避免旧页面、旧选区或程序性事件在后续切换时被误当成最新用户意图。
+     */
+    private static final long ACTIVATION_INPUT_EXPIRE_WINDOW_MS = 2000L;
+
     private long contentVersion;
     private long previewRenderedVersion;
     private boolean previewReady;
@@ -33,10 +40,13 @@ public class PreviewEditorSyncState {
 
     private int previewAnchorLine = -1;
     private String previewAnchorSourceId;
+    private PreviewAnchorKind previewAnchorKind = PreviewAnchorKind.USER_SCROLL;
+    private long previewAnchorUpdatedAt;
 
     private int previewSelectionStartLine = -1;
     private int previewSelectionEndLine = -1;
     private String previewSelectionPreviewText;
+    private long previewSelectionUpdatedAt;
 
     private long suppressEditorEventUntil;
     private long suppressPreviewEventUntil;
@@ -44,6 +54,8 @@ public class PreviewEditorSyncState {
     private int lastDispatchedEditorRevealLine = -1;
     private double lastDispatchedEditorRevealTopRatio = -1d;
     private long lastDispatchedEditorRevealAt;
+    private int lastRestoredSourceLine = -1;
+    private long lastRestoredSourceAt;
 
     private PendingRevealCommand pendingRevealCommand;
 
@@ -139,8 +151,38 @@ public class PreviewEditorSyncState {
      * @param sourceId   对应的块级锚点标识，可为空
      */
     public void updatePreviewAnchor(int anchorLine, @Nullable String sourceId) {
+        updatePreviewAnchor(anchorLine, sourceId, PreviewAnchorKind.USER_SCROLL);
+    }
+
+    /**
+     * 更新最近一次来自预览视口的语义锚点，并附带锚点有效性类型。
+     * 该类型用于区分用户真实滚动与无滚动场景下的伪锚点，避免激活切换时错误消费无效锚点。
+     *
+     * @param anchorLine 当前预览视口反推出的源码锚点行
+     * @param sourceId   对应的块级锚点标识，可为空
+     * @param anchorKind 预览锚点类型
+     */
+    public void updatePreviewAnchor(int anchorLine, @Nullable String sourceId, @NotNull PreviewAnchorKind anchorKind) {
+        updatePreviewAnchor(anchorLine, sourceId, anchorKind, System.currentTimeMillis());
+    }
+
+    /**
+     * 更新最近一次来自预览视口的语义锚点，并显式写入该锚点的产生时间。
+     * 该重载主要用于测试或需要外部精确控制事件时间线的场景；常规业务代码应优先使用自动取当前时间的重载。
+     *
+     * @param anchorLine      当前预览视口反推出来的源码锚点行
+     * @param sourceId        对应的块级锚点标识，可为空
+     * @param anchorKind      预览锚点类型
+     * @param updatedAtMillis 锚点被宿主接收时的时间戳，用于后续激活恢复时的过期判定
+     */
+    public void updatePreviewAnchor(int anchorLine,
+                                    @Nullable String sourceId,
+                                    @NotNull PreviewAnchorKind anchorKind,
+                                    long updatedAtMillis) {
         previewAnchorLine = anchorLine;
         previewAnchorSourceId = sourceId;
+        previewAnchorKind = anchorKind;
+        previewAnchorUpdatedAt = updatedAtMillis;
     }
 
     /**
@@ -152,9 +194,26 @@ public class PreviewEditorSyncState {
      * @param selectedTextPreview 选中文本摘要，可为空
      */
     public void updatePreviewSelection(int startLine, int endLine, @Nullable String selectedTextPreview) {
+        updatePreviewSelection(startLine, endLine, selectedTextPreview, System.currentTimeMillis());
+    }
+
+    /**
+     * 更新最近一次来自预览页的选区定位信息，并显式写入该选区的产生时间。
+     * 该时间戳用于约束选区只在短时间内参与“切回源码”的自动恢复，避免旧选区长期滞留后跨多次切换反复生效。
+     *
+     * @param startLine           选区起始源码行
+     * @param endLine             选区结束源码行
+     * @param selectedTextPreview 选中文本摘要，可为空
+     * @param updatedAtMillis     选区被宿主接收时的时间戳，用于激活恢复的过期判定
+     */
+    public void updatePreviewSelection(int startLine,
+                                       int endLine,
+                                       @Nullable String selectedTextPreview,
+                                       long updatedAtMillis) {
         previewSelectionStartLine = startLine;
         previewSelectionEndLine = endLine;
         previewSelectionPreviewText = selectedTextPreview;
+        previewSelectionUpdatedAt = updatedAtMillis;
     }
 
     /**
@@ -165,6 +224,7 @@ public class PreviewEditorSyncState {
         previewSelectionStartLine = -1;
         previewSelectionEndLine = -1;
         previewSelectionPreviewText = null;
+        previewSelectionUpdatedAt = 0L;
     }
 
     /**
@@ -174,10 +234,45 @@ public class PreviewEditorSyncState {
      * @return 可用目标行；若当前没有任何有效锚点则返回 {@code -1}
      */
     public int resolveSourceActivationTargetLine() {
-        if (previewSelectionStartLine >= 0) {
+        return resolveSourceActivationTargetLine(System.currentTimeMillis());
+    }
+
+    /**
+     * 按给定时间点解析“切回源码编辑器”时优先跳转的目标行。
+     * 解析顺序仍然保持“稳定预览选区优先、普通预览视口锚点兜底”，但两者都必须在有效时间窗内，超时后直接视为无效输入。
+     *
+     * @param nowMillis 当前用于判定输入是否过期的时间戳
+     * @return 可用目标行；若当前没有任何仍然有效的预览输入则返回 {@code -1}
+     */
+    public int resolveSourceActivationTargetLine(long nowMillis) {
+        if (previewSelectionStartLine >= 0 && !isActivationInputExpired(previewSelectionUpdatedAt, nowMillis)) {
             return previewSelectionStartLine;
         }
+        if (!previewAnchorKind.isEligibleForActivationRestore()) {
+            return -1;
+        }
+        if (previewAnchorLine < 0 || isActivationInputExpired(previewAnchorUpdatedAt, nowMillis)) {
+            return -1;
+        }
         return previewAnchorLine;
+    }
+
+    /**
+     * 判断某条预览输入是否已经超过可参与激活恢复的有效时间窗。
+     * 当时间戳缺失、异常倒退或距离当前时间过久时，都按过期处理，优先保证不会消费陈旧状态。
+     *
+     * @param updatedAtMillis 输入最近一次被宿主接收时的时间戳
+     * @param nowMillis       当前判定时刻
+     * @return {@code true} 表示该预览输入不应继续参与激活恢复
+     */
+    private boolean isActivationInputExpired(long updatedAtMillis, long nowMillis) {
+        if (updatedAtMillis <= 0L) {
+            return true;
+        }
+        if (nowMillis < updatedAtMillis) {
+            return false;
+        }
+        return nowMillis - updatedAtMillis > ACTIVATION_INPUT_EXPIRE_WINDOW_MS;
     }
 
     /**
@@ -264,6 +359,18 @@ public class PreviewEditorSyncState {
         lastDispatchedEditorRevealAt = nowMillis;
     }
 
+    /**
+     * 记录最近一次“预览回写到源码编辑器”的实际恢复动作。
+     * 该记录只服务于激活切换场景的 no-op 去重，不改变预览锚点、选区或挂起命令状态。
+     *
+     * @param line      最近一次实际恢复到的目标逻辑行号
+     * @param nowMillis 执行恢复时的时间戳
+     */
+    public void recordSourceRestore(int line, long nowMillis) {
+        lastRestoredSourceLine = line;
+        lastRestoredSourceAt = nowMillis;
+    }
+
     public long getContentVersion() {
         return contentVersion;
     }
@@ -297,6 +404,11 @@ public class PreviewEditorSyncState {
         return previewAnchorSourceId;
     }
 
+    @NotNull
+    public PreviewAnchorKind getPreviewAnchorKind() {
+        return previewAnchorKind;
+    }
+
     public int getPreviewSelectionStartLine() {
         return previewSelectionStartLine;
     }
@@ -308,6 +420,26 @@ public class PreviewEditorSyncState {
     @Nullable
     public String getPreviewSelectionPreviewText() {
         return previewSelectionPreviewText;
+    }
+
+    /**
+     * 读取最近一次实际执行的源码恢复目标行号。
+     * 该值仅用于激活切换时的 no-op 判断，不代表当前源码光标或当前预览锚点。
+     *
+     * @return 最近一次实际恢复到的目标逻辑行号；若尚未发生恢复则返回负数
+     */
+    public int getLastRestoredSourceLine() {
+        return lastRestoredSourceLine;
+    }
+
+    /**
+     * 读取最近一次实际执行源码恢复的时间戳。
+     * 该时间戳用于识别“同一目标在极短时间内被重复恢复”的抖动场景。
+     *
+     * @return 最近一次执行源码恢复的时间戳；若尚未发生恢复则返回 0
+     */
+    public long getLastRestoredSourceAt() {
+        return lastRestoredSourceAt;
     }
 
     /**
@@ -350,6 +482,28 @@ public class PreviewEditorSyncState {
 
         public String getReason() {
             return reason;
+        }
+    }
+
+    /**
+     * 预览锚点类型。
+     * 该类型用于区分哪些锚点可以在切回源码编辑器时参与自动恢复定位。
+     */
+    public enum PreviewAnchorKind {
+        USER_SCROLL(true),
+        USER_SELECTION(true),
+        PROGRAMMATIC_REVEAL(false),
+        ACTIVATION_SYNC(false),
+        NO_SCROLL_SYNTHETIC(false);
+
+        private final boolean eligibleForActivationRestore;
+
+        PreviewAnchorKind(boolean eligibleForActivationRestore) {
+            this.eligibleForActivationRestore = eligibleForActivationRestore;
+        }
+
+        public boolean isEligibleForActivationRestore() {
+            return eligibleForActivationRestore;
         }
     }
 }

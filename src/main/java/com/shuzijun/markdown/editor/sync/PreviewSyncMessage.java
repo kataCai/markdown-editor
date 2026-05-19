@@ -1,6 +1,10 @@
 package com.shuzijun.markdown.editor.sync;
 
+import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
+import org.jetbrains.annotations.NotNull;
+
+import java.util.List;
 
 /**
  * 预览联动统一消息对象。
@@ -15,6 +19,7 @@ public class PreviewSyncMessage {
     public static final String TYPE_PREVIEW_RENDERED = "previewRendered";
     public static final String TYPE_PREVIEW_DIRTY_CHANGED = "previewDirtyChanged";
     public static final String TYPE_PREVIEW_SELECTION_CHANGED = "previewSelectionChanged";
+    public static final String TYPE_PREVIEW_SELECTION_CLEARED = "previewSelectionCleared";
     public static final String TYPE_PREVIEW_VIEWPORT_CHANGED = "previewViewportChanged";
     public static final String TYPE_APPLY_MARKDOWN = "applyMarkdown";
     public static final String TYPE_REVEAL_SOURCE_LINE = "revealSourceLine";
@@ -65,10 +70,12 @@ public class PreviewSyncMessage {
                                                    long contentVersion,
                                                    String source,
                                                    String markdown,
-                                                   String reason) {
+                                                   String reason,
+                                                   @NotNull List<MarkdownSourceMapParser.BlockMapping> blockMappings) {
         JSONObject payload = new JSONObject();
         payload.put("markdown", markdown);
         payload.put("reason", reason);
+        payload.put("sourceMap", toSourceMapJson(blockMappings));
         return new PreviewSyncMessage(
                 TYPE_APPLY_MARKDOWN,
                 filePath,
@@ -77,6 +84,27 @@ public class PreviewSyncMessage {
                 source,
                 payload
         );
+    }
+
+    @NotNull
+    private static JSONArray toSourceMapJson(@NotNull List<MarkdownSourceMapParser.BlockMapping> blockMappings) {
+        JSONArray blocksArray = new JSONArray();
+        for (MarkdownSourceMapParser.BlockMapping blockMapping : blockMappings) {
+            JSONObject blockJson = new JSONObject();
+            blockJson.put("blockType", blockMapping.getBlockType().name());
+            blockJson.put("startLine", blockMapping.getStartLine());
+            blockJson.put("endLine", blockMapping.getEndLine());
+            JSONArray rowArray = new JSONArray();
+            for (MarkdownSourceMapParser.RowMapping rowMapping : blockMapping.getRowMappings()) {
+                JSONObject rowJson = new JSONObject();
+                rowJson.put("startLine", rowMapping.getStartLine());
+                rowJson.put("endLine", rowMapping.getEndLine());
+                rowArray.add(rowJson);
+            }
+            blockJson.put("rowMappings", rowArray);
+            blocksArray.add(blockJson);
+        }
+        return blocksArray;
     }
 
     /**

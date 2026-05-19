@@ -21,6 +21,7 @@ public class PreviewEditorSyncCoordinator {
     private final PreviewEditorSyncState state = new PreviewEditorSyncState();
 
     private String currentMarkdown = "";
+    private List<MarkdownSourceMapParser.BlockMapping> currentBlockMappings = Collections.emptyList();
 
     /**
      * 创建指定文件对应的同步协调器。
@@ -42,6 +43,7 @@ public class PreviewEditorSyncCoordinator {
     @NotNull
     public List<PreviewSyncMessage> updateDocument(@NotNull String markdown, long contentVersion) {
         currentMarkdown = markdown;
+        currentBlockMappings = MarkdownSourceMapParser.parse(markdown);
         state.markContentChanged(contentVersion);
         if (!state.isPreviewReady() || state.isPreviewDirty()) {
             return Collections.emptyList();
@@ -159,7 +161,8 @@ public class PreviewEditorSyncCoordinator {
                 state.getContentVersion(),
                 source,
                 currentMarkdown,
-                reason
+                reason,
+                currentBlockMappings
         );
     }
 }

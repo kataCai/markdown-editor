@@ -307,8 +307,10 @@
         if (!format && md === fileValue) {
             return;
         }
+        updateSyncState("saving");
         $.post(fileUrl, {"value": md}, function (data) {
             if (data.success === false) {
+                updateSyncState("failed");
                 vditor.tip("Failed to save file:" + data.message, 0);
             } else {
                 fileValue = md;
@@ -317,6 +319,7 @@
                 setPreviewDirtyState(false, "user");
             }
         }).fail(function () {
+            updateSyncState("failed");
             vditor.tip("Save file request error", 0);
         })
     }
@@ -368,11 +371,31 @@
             return;
         }
         let synced = document.createElement("span");
-        synced.className = "vditor-counter vditor-tooltipped vditor-tooltipped__nw";
+        synced.className = "vditor-counter markdown-sync-state vditor-tooltipped vditor-tooltipped__nw";
         synced.id = "syncedTip";
-        synced.title = "Automatic synchronization after losing focus";
-        synced.innerHTML = isSynced ? "Synced" : "Not Synced";
         toolbarElement.appendChild(synced);
+        updateSyncState(isSynced ? "saved" : "unsaved");
+    }
+
+    function updateSyncState(state) {
+        const synced = document.getElementById("syncedTip");
+        if (!synced) {
+            return;
+        }
+        synced.className = "vditor-counter markdown-sync-state markdown-sync-state--" + state + " vditor-tooltipped vditor-tooltipped__nw";
+        if (state === "saved") {
+            synced.title = "Saved on disk";
+            synced.innerHTML = "Saved";
+        } else if (state === "saving") {
+            synced.title = "Saving changes";
+            synced.innerHTML = "Saving...";
+        } else if (state === "failed") {
+            synced.title = "Save failed";
+            synced.innerHTML = "Failed";
+        } else {
+            synced.title = "Unsaved changes";
+            synced.innerHTML = "Unsaved";
+        }
     }
 
     function syncedTip(isSynced, md) {
@@ -381,9 +404,9 @@
             return;
         }
         if (!initError && (isSynced || md === fileValue)) {
-            syncedElement.innerHTML = "Synced";
+            updateSyncState("saved");
         } else {
-            syncedElement.innerHTML = "Not Synced";
+            updateSyncState("unsaved");
         }
 
     }
@@ -1396,7 +1419,7 @@
             "markdown": {
                 "sanitize": false
             },
-            "maxWidth": $(window).width() - 100,
+            "maxWidth": Math.min(Math.max($(window).width() - 100, 720), 1080),
             "actions": ["desktop", "tablet", "mobile"],
             "hljs": {"style": darcula ? "dracula" : "github"},
             "math": {

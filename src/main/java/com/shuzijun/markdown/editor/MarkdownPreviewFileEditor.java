@@ -6,6 +6,7 @@ import com.google.common.net.PercentEscaper;
 import com.google.common.net.UrlEscapers;
 import com.intellij.ide.structureView.StructureViewBuilder;
 import com.intellij.ide.util.PropertiesComponent;
+import com.intellij.lang.LanguageStructureViewBuilder;
 import com.intellij.openapi.actionSystem.ActionManager;
 import com.intellij.openapi.actionSystem.ActionToolbar;
 import com.intellij.openapi.actionSystem.AnAction;
@@ -37,6 +38,8 @@ import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.util.UserDataHolderBase;
 import com.intellij.openapi.util.io.FileUtilRt;
 import com.intellij.openapi.vfs.VirtualFile;
+import com.intellij.psi.PsiFile;
+import com.intellij.psi.PsiManager;
 import com.intellij.ui.DocumentAdapter;
 import com.intellij.ui.JBColor;
 import com.intellij.ui.components.JBLabel;
@@ -48,7 +51,6 @@ import com.intellij.util.Url;
 import com.intellij.util.Urls;
 import com.intellij.util.io.URLUtil;
 import com.intellij.util.messages.MessageBusConnection;
-import com.intellij.util.ui.UIUtil;
 import com.shuzijun.markdown.controller.FileApplicationService;
 import com.shuzijun.markdown.controller.PreviewStaticServer;
 import com.shuzijun.markdown.editor.sync.EditorActivationSyncSupport;
@@ -68,10 +70,6 @@ import org.jetbrains.ide.BuiltInServerManager;
 import javax.swing.*;
 import javax.swing.event.DocumentEvent;
 import java.awt.*;
-import java.awt.event.KeyAdapter;
-import java.awt.event.KeyEvent;
-import java.awt.event.MouseAdapter;
-import java.awt.event.MouseEvent;
 import java.beans.PropertyChangeListener;
 import java.io.File;
 import java.io.FileInputStream;
@@ -110,7 +108,7 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
      */
     private MarkdownHtmlPanel myPanel;
 
-    private final JBPanel toolbarPanel = new JBPanel(new FlowLayout(FlowLayout.LEFT));
+    private final JBPanel toolbarPanel = new JBPanel(new FlowLayout(FlowLayout.LEFT, 4, 4));
     private final JBTextField searchField = new JBTextField();
 
     private final Url servicePath = BuiltInServerManager.getInstance().addAuthToken(Urls.parseEncoded("http://localhost:" + BuiltInServerManager.getInstance().getPort() + PreviewStaticServer.PREFIX));
@@ -161,7 +159,10 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
             @Override
             public void globalSchemeChange(@Nullable EditorColorsScheme scheme) {
                 if (myPanel != null) {
-                    myPanel.updateStyle(getStyle(false));
+                    EditorColorsScheme currentScheme = scheme == null
+                            ? EditorColorsManager.getInstance().getGlobalScheme()
+                            : scheme;
+                    myPanel.updateStyle(getStyle(false), isDarkTheme(currentScheme.getDefaultBackground()));
                 }
             }
         });
@@ -733,7 +734,8 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
     public StructureViewBuilder getStructureViewBuilder() {
         VirtualFile file = FileDocumentManager.getInstance().getFile(myDocument);
         if (file == null || !file.isValid()) return null;
-        return StructureViewBuilder.PROVIDER.getStructureViewBuilder(file.getFileType(), file, myProject);
+        PsiFile psiFile = PsiManager.getInstance(myProject).findFile(file);
+        return psiFile == null ? null : LanguageStructureViewBuilder.getInstance().getStructureViewBuilder(psiFile);
     }
 
     @Override
@@ -795,7 +797,7 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
                     .replace("{{serverToken}}", StringUtils.isNotBlank(servicePath.getParameters()) ? servicePath.getParameters().substring(1) : "")
                     .replace("{{filePath}}", URL_FRAGMENT_ESCAPER.escape(myFile.getPath()))
                     .replace("{{Lang}}", PropertiesUtils.getInfo("Lang"))
-                    .replace("{{darcula}}", UIUtil.isUnderDarcula() + "")
+                    .replace("{{darcula}}", isDarkTheme(EditorColorsManager.getInstance().getGlobalScheme().getDefaultBackground()) + "")
                     .replace("{{userTemplate}}", templateFile.exists() + "")
                     .replace("{{projectUrl}}", isPresentableUrl ? URL_FRAGMENT_ESCAPER.escape(myProject.getPresentableUrl()) : "")
                     .replace("{{projectName}}", isPresentableUrl ? "" : URL_FRAGMENT_ESCAPER.escape(myProject.getName()))
@@ -823,22 +825,23 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
 
     private String getStyle(boolean isTag) {
         try {
-            EditorColorsSchemeImpl editorColorsScheme = (EditorColorsSchemeImpl) EditorColorsManager.getInstance().getGlobalScheme();
+            EditorColorsScheme editorColorsScheme = EditorColorsManager.getInstance().getGlobalScheme();
             Color defaultBackground = editorColorsScheme.getDefaultBackground();
 
-            Color scrollbarThumbColor = ScrollBarPainter.THUMB_OPAQUE_BACKGROUND.getDefaultColor();
-            if (editorColorsScheme.getColor(ScrollBarPainter.THUMB_OPAQUE_BACKGROUND) != null) {
-                scrollbarThumbColor = editorColorsScheme.getColor(ScrollBarPainter.THUMB_OPAQUE_BACKGROUND);
-            }
-
             Color text = editorColorsScheme.getDefaultForeground();
+            Color scrollbarThumbColor = UIManager.getColor("ScrollBar.thumb");
+            if (scrollbarThumbColor == null) {
+                scrollbarThumbColor = text == null ? defaultBackground : text;
+            }
             String fontFamily = "font-family:\"" + editorColorsScheme.getEditorFontName() + "\",\"Helvetica Neue\",\"Luxi Sans\",\"DejaVu Sans\"," +
                     "\"Hiragino Sans GB\",\"Microsoft Yahei\",sans-serif,\"Apple Color Emoji\",\"Segoe UI Emoji\",\"Noto Color Emoji\",\"Segoe UI Symbol\"," +
                     "\"Android Emoji\",\"EmojiSymbols\";";
             StringBuilder sb = new StringBuilder(isTag ? "<style id=\"ideaStyle\">" : "");
-            sb.append(UIUtil.isUnderDarcula() ? ".vditor--dark" : ".vditor").append("{--panel-background-color:").append(toHexColor(defaultBackground))
+            boolean darkTheme = isDarkTheme(defaultBackground);
+            sb.append(darkTheme ? ".vditor--dark" : ".vditor").append("{--panel-background-color:").append(toHexColor(defaultBackground))
                     .append(";--textarea-background-color:").append(toHexColor(defaultBackground)).append(";");
             sb.append("--toolbar-background-color:").append(toHexColor(JBColor.background())).append(";");
+            sb.append("--border-color:").append(toHexColor(JBColor.border())).append(";");
             sb.append("}");
             sb.append("::-webkit-scrollbar-track {background-color:").append(toHexColor(defaultBackground)).append(";}");
             sb.append("::-webkit-scrollbar-thumb {background-color:").append(toHexColor(scrollbarThumbColor)).append(";}");
@@ -851,14 +854,39 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
             if (text != null) {
                 sb.append(".vditor-reset table {color:").append(toHexColor(text)).append(";}");
             }
+            Color linkColor = UIManager.getColor("Link.activeForeground");
+            if (linkColor == null) {
+                linkColor = JBColor.BLUE;
+            }
+            Color borderColor = JBColor.border();
+            Color codeBackground = darkTheme ? new Color(255, 255, 255, 18) : new Color(0, 0, 0, 8);
+            Color quoteBackground = darkTheme ? new Color(255, 255, 255, 12) : new Color(0, 0, 0, 6);
+            sb.append(".vditor-reset a{color:").append(toHexColor(linkColor)).append(";}");
+            sb.append(".vditor-reset h1,.vditor-reset h2,.vditor-reset h3,.vditor-reset h4,.vditor-reset h5,.vditor-reset h6{");
+            if (text != null) {
+                sb.append("color:").append(toHexColor(text)).append(";");
+            }
+            sb.append("border-bottom-color:").append(toHexColor(borderColor)).append(";}");
+            sb.append(".vditor-reset blockquote{background-color:").append(toHexColor(quoteBackground))
+                    .append(";border-left-color:").append(toHexColor(linkColor)).append(";}");
+            sb.append(".vditor-reset code:not(.hljs){background-color:").append(toHexColor(codeBackground))
+                    .append(";border-color:").append(toHexColor(borderColor)).append(";}");
+            sb.append(".vditor-reset pre{background-color:").append(toHexColor(codeBackground))
+                    .append(";border-color:").append(toHexColor(borderColor)).append(";}");
+            sb.append(".vditor-reset table th,.vditor-reset table td{border-color:").append(toHexColor(borderColor)).append(";}");
             sb.append(isTag ? "</style>" : "");
-            LOG.info("markdown style: " + sb + " ; Darcula: " + UIUtil.isUnderDarcula());
+            LOG.info("markdown style: " + sb + " ; Dark theme: " + darkTheme);
             return sb.toString();
         } catch (Exception e) {
             LOG.info("Failed to create style", e);
             return "";
         }
 
+    }
+
+    private boolean isDarkTheme(Color background) {
+        double luminance = (0.2126 * background.getRed() + 0.7152 * background.getGreen() + 0.0722 * background.getBlue()) / 255;
+        return luminance < 0.5;
     }
 
     private String toHexColor(Color color) {

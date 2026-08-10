@@ -142,6 +142,8 @@ public class MarkdownHtmlPanel extends JCEFHtmlPanel {
                 String requestUrl = request.getURL();
                 if (requestUrl.startsWith(url)) {
                     return false;
+                } else if (isEmbeddedRenderResource(requestUrl)) {
+                    return false;
                 } else if (!user_gesture) {
                     if (requestUrl.contains("csp=false")) {
                         iframe.add(requestUrl);
@@ -189,6 +191,9 @@ public class MarkdownHtmlPanel extends JCEFHtmlPanel {
         getJBCefClient().addLifeSpanHandler(lifeSpanHandler = new CefLifeSpanHandlerAdapter() {
             @Override
             public boolean onBeforePopup(CefBrowser browser, CefFrame frame, String target_url, String target_frame_name) {
+                if (isEmbeddedRenderResource(target_url)) {
+                    return true;
+                }
                 if (!target_url.startsWith(url)) {
                     openUrl(URLDecoder.decode(frame.getURL(), StandardCharsets.UTF_8), URLDecoder.decode(target_url, StandardCharsets.UTF_8));
                 }
@@ -305,11 +310,21 @@ public class MarkdownHtmlPanel extends JCEFHtmlPanel {
         }
     }
 
+    private boolean isEmbeddedRenderResource(String requestUrl) {
+        return requestUrl != null && requestUrl.startsWith("https://www.plantuml.com/plantuml/");
+    }
+
     private void openSearchEverywhere(String searchText) {
         SearchEverywhereManager manager = SearchEverywhereManager.getInstance(project);
         if (!manager.isShown()) {
             ApplicationManager.getApplication().invokeLater(() -> {
-                AnActionEvent anActionEvent = AnActionEvent.createFromDataContext(ActionPlaces.UNKNOWN, null, DataManager.getInstance().getDataContext(getComponent()));
+                AnActionEvent anActionEvent = AnActionEvent.createEvent(
+                        DataManager.getInstance().getDataContext(getComponent()),
+                        new Presentation(),
+                        ActionPlaces.UNKNOWN,
+                        ActionUiKind.NONE,
+                        null
+                );
                 manager.show(SearchEverywhereManagerImpl.ALL_CONTRIBUTORS_GROUP_ID, searchText, anActionEvent);
             });
         }
@@ -335,8 +350,8 @@ public class MarkdownHtmlPanel extends JCEFHtmlPanel {
         return sb.toString();
     }
 
-    public void updateStyle(String style) {
-        getCefBrowser().executeJavaScript("updateStyle('" + style + "'," + UIUtil.isUnderDarcula() + ");", getCefBrowser().getURL(), 0);
+    public void updateStyle(String style, boolean darkTheme) {
+        getCefBrowser().executeJavaScript("updateStyle(" + toJsString(style) + "," + darkTheme + ");", getCefBrowser().getURL(), 0);
     }
 
     /**
@@ -524,9 +539,8 @@ public class MarkdownHtmlPanel extends JCEFHtmlPanel {
                         if (StringUtils.isEmpty(content)) {
                             return;
                         }
-                        content = content.replaceAll("\n", "\\\\n").replaceAll("\r", "\\\\r");
                         getCefBrowser().executeJavaScript("jsAddTime()", getCefBrowser().getURL(), 0);
-                        getCefBrowser().executeJavaScript("jsPaste('" + content + "')", getCefBrowser().getURL(), 0);
+                        getCefBrowser().executeJavaScript("jsPaste(" + toJsString(content) + ")", getCefBrowser().getURL(), 0);
                     }
 
                     @Override
@@ -542,5 +556,47 @@ public class MarkdownHtmlPanel extends JCEFHtmlPanel {
             }
             return null;
         }
+    }
+
+    private static String toJsString(String value) {
+        if (value == null) {
+            return "''";
+        }
+        StringBuilder sb = new StringBuilder(value.length() + 2);
+        sb.append('\'');
+        for (int i = 0; i < value.length(); i++) {
+            char ch = value.charAt(i);
+            switch (ch) {
+                case '\\':
+                    sb.append("\\\\");
+                    break;
+                case '\'':
+                    sb.append("\\'");
+                    break;
+                case '\n':
+                    sb.append("\\n");
+                    break;
+                case '\r':
+                    sb.append("\\r");
+                    break;
+                case '\t':
+                    sb.append("\\t");
+                    break;
+                case '\b':
+                    sb.append("\\b");
+                    break;
+                case '\f':
+                    sb.append("\\f");
+                    break;
+                default:
+                    if (ch < 0x20 || ch == '\u2028' || ch == '\u2029') {
+                        sb.append(String.format("\\u%04x", (int) ch));
+                    } else {
+                        sb.append(ch);
+                    }
+            }
+        }
+        sb.append('\'');
+        return sb.toString();
     }
 }

@@ -33,6 +33,8 @@ dependencies {
     implementation("com.alibaba:fastjson:1.2.69")
     api("org.apache.commons:commons-lang3:3.9")
     implementation("commons-lang:commons-lang:2.6")
+    // 这些测试源码基于 JUnit 4 编写，补齐测试依赖后才能在 JDK 25 下完成编译和回归执行。
+    testImplementation("junit:junit:4.13.2")
 
     intellijPlatform {
         create(providers.gradleProperty("platformType"), providers.gradleProperty("platformVersion"))

@@ -8,6 +8,8 @@
 
 ### Changed
 
+- Upgrade bundled Vditor to `3.11.2`, which brings Mermaid `11.6.0` into both preview and export rendering paths.
+
 ### Fixed
 
 - Fixed unexpected browser navigation to PlantUML render URLs after opening Markdown files that contain PlantUML diagrams.

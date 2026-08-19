@@ -79,8 +79,14 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.text.DecimalFormat;
 import java.text.DecimalFormatSymbols;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Markdown 预览编辑器。
@@ -92,6 +98,8 @@ import java.text.DecimalFormatSymbols;
 public class MarkdownPreviewFileEditor extends UserDataHolderBase implements FileEditor {
 
     private static final Logger LOG = Logger.getInstance(MarkdownPreviewFileEditor.class);
+    private static final Pattern CODE_THEME_PATTERN = Pattern.compile("\"([^\"]+)\"");
+    private static final Set<String> SUPPORTED_PREVIEW_CODE_THEMES = loadSupportedPreviewCodeThemes();
 
     static final String URL_PATH_OTHER_SAFE_CHARS_LACKING_PLUS =
             "-._~" // Unreserved characters.
@@ -387,6 +395,12 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
                 break;
             case PreviewSyncMessage.TYPE_PREVIEW_DIRTY_CHANGED:
                 syncCoordinator.handlePreviewDirtyChanged(message.getJSONObject("payload").getBooleanValue("dirty"));
+                break;
+            case PreviewSyncMessage.TYPE_PREVIEW_CODE_THEME_CHANGED:
+                JSONObject codeThemePayload = message.getJSONObject("payload");
+                if (codeThemePayload != null) {
+                    persistPreviewCodeTheme(codeThemePayload.getString("codeTheme"));
+                }
                 break;
             case PreviewSyncMessage.TYPE_PREVIEW_VIEWPORT_CHANGED:
                 handlePreviewViewportChanged(message.getJSONObject("payload"));
@@ -786,6 +800,70 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
         }
     }
 
+    /**
+     * 持久化预览页代码块高亮主题，供下次重新打开同一文件时沿用。
+     * 这里会把空值和非法值统一归一化为默认主题，避免异常消息把配置写成不可用状态。
+     *
+     * @param codeTheme 预览页回传的代码块高亮主题
+     */
+    private void persistPreviewCodeTheme(@Nullable String codeTheme) {
+        String normalizedCodeTheme = normalizePreviewCodeTheme(codeTheme);
+        PropertiesComponent.getInstance().setValue(PluginConstant.editorPreviewCodeThemeKey, normalizedCodeTheme, PluginConstant.DEFAULT_PREVIEW_CODE_THEME);
+    }
+
+    /**
+     * 读取预览页代码块高亮主题的当前值。
+     * 读取失败、空值或尚未初始化时统一回落到默认主题，保证首次打开时主题明确且稳定。
+     *
+     * @return 当前应注入到预览页的代码块高亮主题
+     */
+    private String getPreviewCodeTheme() {
+        return normalizePreviewCodeTheme(PropertiesComponent.getInstance().getValue(PluginConstant.editorPreviewCodeThemeKey, PluginConstant.DEFAULT_PREVIEW_CODE_THEME));
+    }
+
+    /**
+     * 归一化预览页代码块高亮主题。
+     * 空值、空白值和非法值都会回落到默认主题，避免历史脏数据影响首次打开或切换后的展示。
+     *
+     * @param codeTheme 原始主题值
+     * @return 经过校验后的可用主题值
+     */
+    private static String normalizePreviewCodeTheme(@Nullable String codeTheme) {
+        String normalizedCodeTheme = StringUtils.defaultIfBlank(codeTheme, PluginConstant.DEFAULT_PREVIEW_CODE_THEME);
+        return SUPPORTED_PREVIEW_CODE_THEMES.contains(normalizedCodeTheme) ? normalizedCodeTheme : PluginConstant.DEFAULT_PREVIEW_CODE_THEME;
+    }
+
+    /**
+     * 从随插件打包的 Vditor 资源中提取当前支持的代码块主题列表。
+     * 宿主侧提前做这层校验，可以避免页面加载前把非法主题写入模板变量后再闪回默认主题。
+     *
+     * @return 支持的主题集合；提取失败时仅保留默认主题
+     */
+    @NotNull
+    private static Set<String> loadSupportedPreviewCodeThemes() {
+        try (InputStream inputStream = MarkdownPreviewFileEditor.class.getResourceAsStream("/vditor/dist/index.js")) {
+            if (inputStream == null) {
+                return Collections.singleton(PluginConstant.DEFAULT_PREVIEW_CODE_THEME);
+            }
+            String js = new String(FileUtilRt.loadBytes(inputStream), StandardCharsets.UTF_8);
+            int start = js.indexOf("Constants.CODE_THEME = [");
+            int end = js.indexOf("Constants.ALIAS_CODE_LANGUAGES");
+            if (start < 0 || end <= start) {
+                return Collections.singleton(PluginConstant.DEFAULT_PREVIEW_CODE_THEME);
+            }
+            String codeThemeSection = js.substring(start, end);
+            Set<String> themes = new HashSet<>();
+            Matcher matcher = CODE_THEME_PATTERN.matcher(codeThemeSection);
+            while (matcher.find()) {
+                themes.add(matcher.group(1));
+            }
+            return themes.isEmpty() ? Collections.singleton(PluginConstant.DEFAULT_PREVIEW_CODE_THEME) : themes;
+        } catch (IOException e) {
+            LOG.warn("Failed to load supported preview code themes", e);
+            return Collections.singleton(PluginConstant.DEFAULT_PREVIEW_CODE_THEME);
+        }
+    }
+
     private String createHtml(boolean isPresentableUrl, MarkdownHtmlPanel tempPanel) {
         InputStream inputStream = null;
 
@@ -807,6 +885,7 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
                     .replace("{{projectName}}", isPresentableUrl ? "" : URL_FRAGMENT_ESCAPER.escape(myProject.getName()))
                     .replace("{{previewToolbarVisible}}", String.valueOf(isPreviewToolbarVisible()))
                     .replace("{{previewEditable}}", String.valueOf(isPreviewEditable()))
+                    .replace("{{previewCodeTheme}}", JSONObject.toJSONString(getPreviewCodeTheme()))
                     .replace("{{ideStyle}}", getStyle(true))
                     .replace("{{injectScript}}", tempPanel.getInjectScript())
                     ;

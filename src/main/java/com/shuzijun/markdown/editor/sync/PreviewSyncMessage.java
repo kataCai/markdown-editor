@@ -21,6 +21,11 @@ public class PreviewSyncMessage {
     public static final String TYPE_PREVIEW_SELECTION_CHANGED = "previewSelectionChanged";
     public static final String TYPE_PREVIEW_SELECTION_CLEARED = "previewSelectionCleared";
     public static final String TYPE_PREVIEW_VIEWPORT_CHANGED = "previewViewportChanged";
+    /**
+     * 预览页回传的代码块高亮主题切换消息。
+     * 宿主接收到该消息后会把最终生效的主题写回持久化配置，保证下次重新打开时沿用同一主题。
+     */
+    public static final String TYPE_PREVIEW_CODE_THEME_CHANGED = "previewCodeThemeChanged";
     public static final String TYPE_APPLY_MARKDOWN = "applyMarkdown";
     public static final String TYPE_REVEAL_SOURCE_LINE = "revealSourceLine";
 

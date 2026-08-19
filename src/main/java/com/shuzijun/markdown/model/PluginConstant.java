@@ -35,6 +35,18 @@ public class PluginConstant {
     public static final String editorAbsolutePathKey="markdown.editor.editorAbsolutePath";
 
     /**
+     * Markdown 预览页代码块高亮主题的持久化配置键。
+     * 该配置只记录预览工具栏中选中的 highlight.js 主题，不影响内容主题或 IDE 主题。
+     */
+    public static final String editorPreviewCodeThemeKey = "markdown.editor.previewCodeTheme";
+
+    /**
+     * Markdown 预览页代码块高亮主题的默认值。
+     * 当配置为空、非法或尚未初始化时统一回落到 androidstudio，避免首次打开时主题闪烁。
+     */
+    public static final String DEFAULT_PREVIEW_CODE_THEME = "androidstudio";
+
+    /**
      * Markdown 预览页顶部网页工具栏的全局默认显隐状态。
      * 该配置控制的是 Vditor 页面内部工具栏，不是 IntelliJ IDE 原生工具栏。
      */

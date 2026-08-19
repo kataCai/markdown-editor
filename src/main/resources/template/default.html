@@ -33,6 +33,25 @@
             display: none !important;
             opacity: 0 !important;
         }
+
+        /* 代码块主题菜单的选中态使用插件自有 class，避免被 Vditor 的菜单打开态样式误清理。*/
+        #vditor .preview-code-theme-selected {
+            position: relative;
+            padding-left: 24px;
+            font-weight: 600;
+            box-shadow: inset 3px 0 0 currentColor;
+        }
+
+        #vditor .preview-code-theme-selected::before {
+            content: "\2713";
+            position: absolute;
+            left: 8px;
+            top: 50%;
+            transform: translateY(-50%);
+            font-size: 12px;
+            line-height: 1;
+            opacity: 0.9;
+        }
     </style>
 </head>
 <body class="body">
@@ -89,6 +108,9 @@
     const previewEditable = "{{previewEditable}}" === "true";
     const currentFilePath = decodeURIComponent("{{filePath}}");
     window.previewEditable = previewEditable;
+    const previewCodeTheme = {{previewCodeTheme}} || "androidstudio";
+    const PREVIEW_CODE_THEME_SELECTED_CLASS = "preview-code-theme-selected";
+    window.previewCodeTheme = previewCodeTheme;
     window.previewSyncDebug = false;
     /**
      * 仅在最近确实发生过用户滚动意图时，才允许把预览侧 scroll 解释为 USER_SCROLL。
@@ -120,6 +142,7 @@
         lastRenderedContentVersion: 0,
         applyingMarkdown: false,
         dirty: false,
+        currentCodeTheme: previewCodeTheme,
         totalMarkdownLineCount: 1,
         sourceMapBlocks: [],
         blockMappings: [],
@@ -498,6 +521,101 @@
         return Array.from(currentModeElement.children).filter(function (element) {
             return element.nodeType === Node.ELEMENT_NODE;
         });
+    }
+
+    /**
+     * 获取代码块主题工具栏面板，供选中态刷新和点击后重标记使用。
+     *
+     * @return 代码块主题面板节点；未初始化时返回 null
+     */
+    function getCodeThemeToolbarElement() {
+        if (!vditor || !vditor.vditor || !vditor.vditor.toolbar || !vditor.vditor.toolbar.elements) {
+            return null;
+        }
+        return vditor.vditor.toolbar.elements["code-theme"] || null;
+    }
+
+    /**
+     * 获取代码块主题子菜单的真实按钮面板。
+     * Vditor 的主按钮和子菜单按钮语义不同，因此这里只返回 `.vditor-hint` 节点，避免把主按钮的打开态当成主题选中态。
+     *
+     * @return 代码块主题子菜单面板；面板未创建或未挂载时返回 null
+     */
+    function getCodeThemePanelElement() {
+        const codeThemeElement = getCodeThemeToolbarElement();
+        if (!codeThemeElement) {
+            return null;
+        }
+        return codeThemeElement.querySelector(".vditor-hint");
+    }
+
+    /**
+     * 从当前高亮样式表链接反推实际生效的代码块主题。
+     * 这样可以在 Vditor 内部对非法主题做回退时，准确得到页面当前真正使用的主题值。
+     *
+     * @return 当前实际生效的代码块主题
+     */
+    function getAppliedCodeTheme() {
+        const styleElement = document.getElementById("vditorHljsStyle");
+        if (!styleElement) {
+            return previewSyncState.currentCodeTheme || previewCodeTheme;
+        }
+        const href = styleElement.getAttribute("href") || "";
+        const match = href.match(/\/styles\/(.+)\.min\.css(?:\?.*)?$/);
+        if (match && match[1]) {
+            return decodeURIComponent(match[1]);
+        }
+        return previewSyncState.currentCodeTheme || previewCodeTheme;
+    }
+
+    /**
+     * 刷新代码块主题菜单中真正的主题按钮选中态。
+     * 这里使用插件自有 class，避免和 Vditor 的菜单打开态类相互覆盖。
+     */
+    function refreshCodeThemeSelection() {
+        const codeThemePanelElement = getCodeThemePanelElement();
+        if (!codeThemePanelElement) {
+            return;
+        }
+        const activeTheme = previewSyncState.currentCodeTheme || previewCodeTheme;
+        codeThemePanelElement.querySelectorAll("button").forEach(function (button) {
+            const buttonTheme = (button.textContent || "").trim();
+            const isCurrent = buttonTheme === activeTheme;
+            button.classList.toggle(PREVIEW_CODE_THEME_SELECTED_CLASS, isCurrent);
+            button.setAttribute("aria-pressed", String(isCurrent));
+        });
+    }
+
+    /**
+     * 应用代码块主题，并在需要时把最新值回传宿主保存。
+     * 若 Vditor 内部把非法主题回退到 github，这里会再主动切回 androidstudio，确保默认值符合产品要求。
+     *
+     * @param codeTheme 目标代码块主题
+     * @param notifyHost 是否把最终主题回传宿主持久化
+     * @param source 回传宿主时使用的来源标记
+     * @return 实际生效的代码块主题
+     */
+    function applyPreviewCodeTheme(codeTheme, notifyHost, source) {
+        if (!vditor || !vditor.vditor) {
+            return previewSyncState.currentCodeTheme || previewCodeTheme;
+        }
+        const requestedTheme = codeTheme || previewSyncState.currentCodeTheme || previewCodeTheme || "androidstudio";
+        const previousTheme = previewSyncState.currentCodeTheme || previewCodeTheme;
+        vditor.vditor.options.preview.hljs.style = requestedTheme;
+        Vditor.setCodeTheme(requestedTheme, vditor.vditor.options.cdn);
+        let appliedTheme = getAppliedCodeTheme();
+        if (appliedTheme === "github" && requestedTheme !== "github" && requestedTheme !== "androidstudio") {
+            appliedTheme = "androidstudio";
+            Vditor.setCodeTheme(appliedTheme, vditor.vditor.options.cdn);
+        }
+        previewSyncState.currentCodeTheme = appliedTheme;
+        window.previewCodeTheme = appliedTheme;
+        vditor.vditor.options.preview.hljs.style = appliedTheme;
+        refreshCodeThemeSelection();
+        if (notifyHost && appliedTheme !== previousTheme) {
+            emitPreviewSyncMessage("previewCodeThemeChanged", {codeTheme: appliedTheme}, source || "programmatic");
+        }
+        return appliedTheme;
     }
 
     function isBlankMarkdownLine(line) {
@@ -1231,6 +1349,20 @@
                 refreshPreviewEditableState();
             });
         }
+        const codeThemeElement = toolbarElements["code-theme"];
+        const codeThemePanelElement = getCodeThemePanelElement();
+        if (codeThemeElement && codeThemePanelElement && codeThemePanelElement.dataset.previewCodeThemeSyncBound !== "true") {
+            codeThemePanelElement.dataset.previewCodeThemeSyncBound = "true";
+            codeThemePanelElement.addEventListener("click", function (event) {
+                const targetButton = event && event.target && event.target.closest
+                    ? event.target.closest("button")
+                    : null;
+                if (!targetButton || !codeThemePanelElement.contains(targetButton)) {
+                    return;
+                }
+                applyPreviewCodeTheme((targetButton.textContent || "").trim() || previewCodeTheme, true, "user");
+            });
+        }
     }
 
     // 运行时只切换工具栏容器显隐，避免重建整个 Vditor 实例导致光标和编辑状态丢失。
@@ -1421,7 +1553,7 @@
             },
             "maxWidth": Math.min(Math.max($(window).width() - 100, 720), 1080),
             "actions": ["desktop", "tablet", "mobile"],
-            "hljs": {"style": darcula ? "dracula" : "github"},
+            "hljs": {"style": previewCodeTheme},
             "math": {
                 "inlineDigit": true
             }
@@ -1442,6 +1574,10 @@
             bindReadonlyInteractionGuards();
             bindPreviewSyncListeners();
             initToolbarExtensions();
+            const appliedCodeTheme = applyPreviewCodeTheme(previewCodeTheme, false, "programmatic");
+            if (appliedCodeTheme !== previewCodeTheme) {
+                emitPreviewSyncMessage("previewCodeThemeChanged", {codeTheme: appliedCodeTheme}, "programmatic");
+            }
             window.setPreviewToolbarVisible(previewToolbarVisible);
             window.setPreviewEditable(previewEditable);
             schedulePreviewSyncArtifactsRebuild("after");
@@ -1465,7 +1601,8 @@
         newStyle.innerHTML = style;
         let oldStyle = document.getElementById('ideaStyle');
         oldStyle.parentNode.replaceChild(newStyle, oldStyle);
-        vditor.setTheme(darcula ? "dark" : "light", darcula ? "idea-dark" : "idea-light", darcula ? "dracula" : "github", vditorThemeCDN)
+        vditor.setTheme(darcula ? "dark" : "light", darcula ? "idea-dark" : "idea-light", vditor.vditor.options.preview.hljs.style || previewCodeTheme, vditorThemeCDN)
+        applyPreviewCodeTheme(vditor.vditor.options.preview.hljs.style || previewCodeTheme, false, "programmatic");
     }
 
 

@@ -7,22 +7,34 @@ import com.intellij.openapi.fileEditor.FileEditor;
 import com.intellij.openapi.fileEditor.FileEditorManager;
 import com.shuzijun.markdown.model.PluginConstant;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 /**
- * 编辑器 TAB 右键菜单中的预览工具栏显隐开关。
+ * Markdown 预览标签页右键菜单中的“预览工具栏”切换动作。
  * <p>
- * 该开关只服务于 Markdown 预览编辑器场景：
- * 1. 仅当当前选中的编辑器是 {@link MarkdownPreviewFileEditor} 时展示；
- * 2. 切换结果会持久化为全局默认值，后续打开的 Markdown 预览页沿用该状态；
- * 3. 切换后会立即同步到当前激活的预览页，避免用户还需要重新打开文件才能看到效果。
+ * 这个动作只负责两件事：
+ * 1. 持久化预览工具栏的全局可见性；
+ * 2. 在菜单中按当前状态展示下一步操作文案，避免用户看到固定的 Show 提示。
+ * <p>
+ * 仅当当前选中的编辑器是 {@link MarkdownPreviewFileEditor} 时才显示。
  */
 public class TogglePreviewToolbarAction extends ToggleAction {
 
     /**
-     * 根据当前预览工具栏的全局默认值，返回右键菜单复选状态。
+     * 工具栏隐藏时，对应菜单需要提示用户“显示”。
+     */
+    private static final String SHOW_PREVIEW_TOOLBAR_TEXT = "Show Preview Toolbar";
+
+    /**
+     * 工具栏显示时，对应菜单需要提示用户“隐藏”。
+     */
+    private static final String HIDE_PREVIEW_TOOLBAR_TEXT = "Hide Preview Toolbar";
+
+    /**
+     * 根据全局持久化状态返回 ToggleAction 的勾选状态。
      *
-     * @param e IntelliJ Action 事件上下文
-     * @return {@code true} 表示应显示预览工具栏，{@code false} 表示应隐藏
+     * @param e IntelliJ Action 事件上下文。
+     * @return {@code true} 表示当前预览工具栏处于显示状态；{@code false} 表示处于隐藏状态。
      */
     @Override
     public boolean isSelected(@NotNull AnActionEvent e) {
@@ -30,10 +42,10 @@ public class TogglePreviewToolbarAction extends ToggleAction {
     }
 
     /**
-     * 持久化新的显隐状态，并立即同步给当前激活的 Markdown 预览编辑器实例。
+     * 持久化新的工具栏显示状态，并同步到当前激活的 Markdown 预览编辑器实例。
      *
-     * @param e     IntelliJ Action 事件上下文
-     * @param state 用户刚切换出的目标状态，{@code true} 表示显示，{@code false} 表示隐藏
+     * @param e IntelliJ Action 事件上下文。
+     * @param state 用户切换后的目标状态，{@code true} 表示显示工具栏，{@code false} 表示隐藏工具栏。
      */
     @Override
     public void setSelected(@NotNull AnActionEvent e, boolean state) {
@@ -45,25 +57,45 @@ public class TogglePreviewToolbarAction extends ToggleAction {
     }
 
     /**
-     * 根据当前选中的编辑器类型，控制右键菜单项是否展示。
+     * 仅在 Markdown 预览标签页右键菜单可见时刷新展示状态和文案。
+     * <p>
+     * 这里先沿用现有的可见性判断，再根据当前持久化状态动态改写菜单文案，
+     * 让菜单表达“下一步会发生什么”，而不是始终显示固定入口。
      *
-     * @param e IntelliJ Action 事件上下文
+     * @param e IntelliJ Action 事件上下文。
      */
     @Override
     public void update(@NotNull AnActionEvent e) {
         boolean visible = getMarkdownPreviewFileEditor(e) != null;
         e.getPresentation().setEnabledAndVisible(visible);
+        if (visible) {
+            e.getPresentation().setText(resolvePreviewToolbarText(isSelected(e)));
+        }
     }
 
     /**
-     * 提取当前激活的 Markdown 预览编辑器。
-     * 这里沿用项目里现有 action 的取值方式，从 {@link FileEditorManager} 读取当前选中的编辑器，
-     * 以保持和现有搜索、开发者工具 action 的行为一致。
+     * 根据当前工具栏可见性解析右键菜单文案。
+     * <p>
+     * 这里返回的是“下一步操作”而不是“当前状态”：
+     * 当工具栏当前隐藏时，应提示 Show；当工具栏当前显示时，应提示 Hide。
      *
-     * @param e IntelliJ Action 事件上下文
-     * @return 当前激活的 {@link MarkdownPreviewFileEditor}；若不存在则返回 {@code null}
+     * @param visible 当前预览工具栏是否可见。
+     * @return 对应的菜单文案。
      */
-    private MarkdownPreviewFileEditor getMarkdownPreviewFileEditor(@NotNull AnActionEvent e) {
+    String resolvePreviewToolbarText(boolean visible) {
+        return visible ? HIDE_PREVIEW_TOOLBAR_TEXT : SHOW_PREVIEW_TOOLBAR_TEXT;
+    }
+
+    /**
+     * 提取当前激活的 Markdown 预览编辑器实例。
+     * <p>
+     * 这里沿用项目里现有的编辑器获取方式，统一通过 {@link FileEditorManager}
+     * 读取当前选中的标签页，避免引入额外状态或绕开现有同步链路。
+     *
+     * @param e IntelliJ Action 事件上下文。
+     * @return 当前激活的 {@link MarkdownPreviewFileEditor}；如果当前标签页不是预览编辑器则返回 {@code null}。
+     */
+    private @Nullable MarkdownPreviewFileEditor getMarkdownPreviewFileEditor(@NotNull AnActionEvent e) {
         if (e.getProject() == null) {
             return null;
         }

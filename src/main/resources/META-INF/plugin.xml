@@ -63,7 +63,7 @@
         </action>
         <action id="markdown.togglePreviewToolbar"
                 class="com.shuzijun.markdown.editor.TogglePreviewToolbarAction"
-                text="Show Preview Toolbar"
+                text="Toggle Preview Toolbar"
                 description="Toggle preview toolbar visibility">
             <add-to-group group-id="EditorTabPopupMenu" anchor="last"/>
         </action>

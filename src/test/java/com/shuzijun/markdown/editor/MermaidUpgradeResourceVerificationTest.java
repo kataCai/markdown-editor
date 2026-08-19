@@ -149,8 +149,99 @@ public class MermaidUpgradeResourceVerificationTest {
     }
 
     /**
+     * 验证 `default.html` 已经预留 Mermaid 放大查看能力所需的关键页面钩子。
+     * 该测试不尝试在 JCEF 中模拟真实点击和缩放，而是先把这次功能依赖的静态结构固化下来，
+     * 重点覆盖三类后续高风险回归：
+     * 1. Mermaid 渲染块重扫入口被误删，导致异步渲染后的图表不再补出放大按钮；
+     * 2. 悬浮查看层的打开、关闭和缩放函数名被整理掉，导致宿主无法继续沿用同一套页面自管能力；
+     * 3. 事件隔离根节点丢失，导致查看层滚轮和点击重新污染现有的预览联动状态。
+     *
+     * @throws IOException 当模板资源读取失败时抛出，用于直接暴露预览页模板缺失的问题
+     */
+    @Test
+    public void shouldKeepDefaultHtmlWiredForMermaidPreviewViewerHooks() throws IOException {
+        String defaultHtml = readProjectFile(DEFAULT_HTML_PATH);
+
+        Assert.assertTrue("default.html 应继续保留 Mermaid 渲染块装饰入口",
+                defaultHtml.contains("function decorateMermaidPreviewBlocks()"));
+        Assert.assertTrue("default.html 应继续保留 Mermaid 放大查看层打开入口",
+                defaultHtml.contains("function openMermaidPreviewViewer("));
+        Assert.assertTrue("default.html 应继续保留 Mermaid 放大查看层关闭入口",
+                defaultHtml.contains("function closeMermaidPreviewViewer()"));
+        Assert.assertTrue("default.html 应继续保留 Mermaid 放大查看层缩放入口",
+                defaultHtml.contains("function updateMermaidPreviewScale("));
+        Assert.assertTrue("default.html 应继续保留 Mermaid 查看层事件隔离判断",
+                defaultHtml.contains("function isMermaidPreviewViewerEventTarget("));
+        Assert.assertTrue("default.html 应继续保留 Mermaid 渲染结果异步重扫所需的 MutationObserver",
+                defaultHtml.contains("new MutationObserver("));
+        Assert.assertTrue("default.html 应继续保留查看层根节点 class，便于统一样式和事件隔离",
+                defaultHtml.contains("markdown-preview-figure-viewer"));
+    }
+
+    /**
+     * 验证 `default.html` 针对 Mermaid 查看层的交互增强仍然保留关键静态结构。
+     * 这条测试聚焦本次优化最容易被后续样式整理或事件重构误伤的三类实现约束：
+     * 1. 查看层 viewport 仍然保留独立拖拽绑定入口，避免放大后只能依赖滚动条浏览大图；
+     * 2. 查看层仍然保留抓手态光标和拖拽中光标，确保交互反馈不会在主题或样式整理时丢失；
+     * 3. toolbar 仍然保留紧凑分组容器，避免四个按钮重新退化为松散的普通 flex 文本按钮。
+     * 由于当前仓库没有浏览器级 UI 自动化，这里先用静态资源断言把关键钩子固化下来，
+     * 一旦后续重构误删拖拽入口或 toolbar 结构，至少能在单测阶段尽早暴露。
+     *
+     * @throws IOException 当模板资源读取失败时抛出，用于直接暴露预览页模板缺失的问题
+     */
+    @Test
+    public void shouldKeepDefaultHtmlWiredForMermaidPreviewViewerDragAndToolbarLayout() throws IOException {
+        String defaultHtml = readProjectFile(DEFAULT_HTML_PATH);
+
+        Assert.assertTrue("default.html 应继续保留 Mermaid 查看层拖拽绑定入口",
+                defaultHtml.contains("function bindMermaidPreviewDrag("));
+        Assert.assertTrue("default.html 应继续保留 Mermaid 查看层拖拽状态清理入口",
+                defaultHtml.contains("function finishMermaidPreviewDrag("));
+        Assert.assertTrue("default.html 应继续保留 Mermaid 查看层默认抓手光标",
+                defaultHtml.contains("cursor: grab;"));
+        Assert.assertTrue("default.html 应继续保留 Mermaid 查看层拖拽中抓取光标",
+                defaultHtml.contains("cursor: grabbing;"));
+        Assert.assertTrue("default.html 应继续保留 Mermaid 查看层工具条分组容器 class",
+                defaultHtml.contains("markdown-preview-figure-viewer__toolbar-group"));
+        Assert.assertTrue("default.html 应继续在查看层打开时绑定拖拽能力",
+                defaultHtml.contains("bindMermaidPreviewDrag(viewportElement);"));
+    }
+
+    /**
+     * 验证 Mermaid 查看层工具栏使用稳定的内联 SVG 图标，而不是依赖字体或文字字符表现图标。
+     * 该测试覆盖参考交互中的四个固定操作：放大、缩小、重置和关闭；同时约束按钮尺寸为紧凑方形，
+     * 防止后续样式调整再次退化成宽大的文字按钮，或因运行环境字体差异导致图标形状不一致。
+     *
+     * @throws IOException 当模板资源读取失败时抛出，用于直接暴露预览页模板缺失的问题
+     */
+    @Test
+    public void shouldKeepMermaidViewerToolbarUsingCompactInlineSvgIcons() throws IOException {
+        String defaultHtml = readProjectFile(DEFAULT_HTML_PATH);
+        String escapedZoomInIconMarker = "data-mermaid-viewer-icon=\\\"zoom-in\\\"";
+        String escapedZoomOutIconMarker = "data-mermaid-viewer-icon=\\\"zoom-out\\\"";
+        String escapedResetIconMarker = "data-mermaid-viewer-icon=\\\"reset\\\"";
+        String escapedCloseIconMarker = "data-mermaid-viewer-icon=\\\"close\\\"";
+
+        Assert.assertTrue("查看层工具栏按钮应统一使用内联 SVG 图标尺寸",
+                defaultHtml.contains(".markdown-preview-figure-viewer__button svg"));
+        Assert.assertTrue("查看层按钮应使用紧凑固定宽度",
+                defaultHtml.contains("width: 32px;"));
+        Assert.assertTrue("查看层按钮应使用紧凑固定高度",
+                defaultHtml.contains("height: 32px;"));
+        Assert.assertTrue("查看层工具栏应包含放大镜加号图标",
+                defaultHtml.contains(escapedZoomInIconMarker));
+        Assert.assertTrue("查看层工具栏应包含放大镜减号图标",
+                defaultHtml.contains(escapedZoomOutIconMarker));
+        Assert.assertTrue("查看层工具栏应包含重置图标",
+                defaultHtml.contains(escapedResetIconMarker));
+        Assert.assertTrue("查看层工具栏应包含关闭图标",
+                defaultHtml.contains(escapedCloseIconMarker));
+    }
+
+    /**
      * 验证仓库里保留了一组可重复使用的 Mermaid 升级验收样例。
-     * 该测试约束样例至少覆盖 5 个 Mermaid 代码块，并同时包含旧语法常见场景与升级后重点关注的图表类型，
+     * 该测试约束样例至少覆盖 6 个 Mermaid 代码块，并同时包含旧语法常见场景、升级后重点关注的图表类型，
+     * 以及一组更适合放大查看回归的“大尺寸图表”样例，
      * 这样后续继续升级时，可以直接拿同一份 Markdown 做预览、HTML 导出和 PDF 导出的手工回归。
      *
      * @throws IOException 当样例资源读取失败时抛出，用于暴露回归基线缺失的问题
@@ -160,7 +251,7 @@ public class MermaidUpgradeResourceVerificationTest {
         String baselineMarkdown = readProjectFile(MERMAID_BASELINE_PATH);
         int mermaidFenceCount = countOccurrences(baselineMarkdown, "```mermaid");
 
-        Assert.assertEquals("升级验收基线应固定为 5 组 Mermaid 样例，便于人工回归复用", 5, mermaidFenceCount);
+        Assert.assertEquals("升级验收基线应固定为 6 组 Mermaid 样例，便于人工回归复用", 6, mermaidFenceCount);
         Assert.assertTrue("基线样例应覆盖传统 flowchart 语法",
                 baselineMarkdown.contains("flowchart TD"));
         Assert.assertTrue("基线样例应覆盖传统 sequenceDiagram 语法",
@@ -171,6 +262,8 @@ public class MermaidUpgradeResourceVerificationTest {
                 baselineMarkdown.contains("mindmap"));
         Assert.assertTrue("基线样例应覆盖升级后重点关注的 quadrantChart 场景",
                 baselineMarkdown.contains("quadrantChart"));
+        Assert.assertTrue("基线样例应覆盖更适合放大查看回归的宽图 Mermaid 场景",
+                baselineMarkdown.contains("Zoom Stress Flowchart"));
     }
 
     /**

@@ -67,3 +67,18 @@ quadrantChart
     "preview smoke": [0.28, 0.78]
     "pdf smoke": [0.36, 0.88]
 ```
+
+## Zoom Stress Flowchart
+
+```mermaid
+flowchart LR
+    A[Zoom Stress Flowchart] --> B[Collect current preview DOM and async Mermaid render result]
+    B --> C[Decorate .language-mermaid blocks without wrapping outer containers]
+    C --> D[Inject top-right zoom trigger only after SVG render succeeds]
+    D --> E[Open in-page floating viewer instead of resizing the whole IDE window]
+    E --> F[Clone the original SVG so source mapping and export DOM stay untouched]
+    F --> G[Provide zoom in, zoom out, reset and close actions in the viewer toolbar]
+    G --> H[Handle mouse wheel zoom inside the viewer viewport with bounded scale]
+    H --> I[Isolate viewer wheel, click and selection events from preview sync listeners]
+    I --> J[Keep HTML export and PDF export output free of viewer-only DOM fragments]
+```

@@ -22,6 +22,11 @@ public class PreviewSyncMessage {
     public static final String TYPE_PREVIEW_SELECTION_CLEARED = "previewSelectionCleared";
     public static final String TYPE_PREVIEW_VIEWPORT_CHANGED = "previewViewportChanged";
     /**
+     * 预览页请求宿主打开独立图片查看器的消息类型。
+     * 页面侧只负责把被点击图片的结构化信息回传给宿主，不直接在 JCEF 内层叠加浮层，避免继续受编辑区视口限制。
+     */
+    public static final String TYPE_PREVIEW_IMAGE_REQUEST = "previewImageRequest";
+    /**
      * 预览页回传的代码块高亮主题切换消息。
      * 宿主接收到该消息后会把最终生效的主题写回持久化配置，保证下次重新打开时沿用同一主题。
      */
@@ -83,6 +88,39 @@ public class PreviewSyncMessage {
         payload.put("sourceMap", toSourceMapJson(blockMappings));
         return new PreviewSyncMessage(
                 TYPE_APPLY_MARKDOWN,
+                filePath,
+                contentVersion,
+                System.currentTimeMillis(),
+                source,
+                payload
+        );
+    }
+
+    /**
+     * 创建预览图片查看请求消息。
+     * 该指令由页面侧在用户点击预览图片时发起，宿主收到后会在 IDE 级独立窗口中展示图片，
+     * 从而避免继续受当前 Markdown 编辑区的 JCEF 视口大小限制。
+     *
+     * @param filePath       当前文档路径
+     * @param contentVersion 当前内容版本
+     * @param source         来源标记
+     * @param imageUrl       被点击图片的真实地址
+     * @param alt            图片替代文本
+     * @param title          图片标题
+     * @return 结构化消息对象
+     */
+    public static PreviewSyncMessage previewImageRequest(String filePath,
+                                                         long contentVersion,
+                                                         String source,
+                                                         String imageUrl,
+                                                         String alt,
+                                                         String title) {
+        JSONObject payload = new JSONObject();
+        payload.put("imageUrl", imageUrl);
+        payload.put("alt", alt);
+        payload.put("title", title);
+        return new PreviewSyncMessage(
+                TYPE_PREVIEW_IMAGE_REQUEST,
                 filePath,
                 contentVersion,
                 System.currentTimeMillis(),

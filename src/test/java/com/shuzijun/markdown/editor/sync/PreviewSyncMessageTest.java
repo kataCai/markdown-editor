@@ -71,4 +71,25 @@ public class PreviewSyncMessageTest {
         Assert.assertEquals(1, sourceMap.size());
         Assert.assertEquals("GENERIC", sourceMap.getJSONObject(0).getString("blockType"));
     }
+
+    /**
+     * 验证图片查看请求会把图片地址、替代文本和标题一起封装进统一消息体。
+     * 这类消息需要从页面侧稳定回传到宿主侧窗口，因此字段名和序列化结果都必须固定下来。
+     */
+    @Test
+    public void shouldCreatePreviewImageRequestWithStructuredPayload() {
+        PreviewSyncMessage message = PreviewSyncMessage.previewImageRequest(
+                "E:/source_code/demo.md",
+                18L,
+                "user",
+                "https://example.com/image.png",
+                "demo alt",
+                "demo title"
+        );
+
+        Assert.assertEquals(PreviewSyncMessage.TYPE_PREVIEW_IMAGE_REQUEST, message.getType());
+        Assert.assertEquals("https://example.com/image.png", message.getPayload().getString("imageUrl"));
+        Assert.assertEquals("demo alt", message.getPayload().getString("alt"));
+        Assert.assertEquals("demo title", message.getPayload().getString("title"));
+    }
 }

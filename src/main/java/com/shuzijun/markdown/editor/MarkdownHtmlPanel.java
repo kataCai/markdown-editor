@@ -398,6 +398,69 @@ public class MarkdownHtmlPanel extends JCEFHtmlPanel {
         return previewEditable && PropertiesComponent.getInstance().getBoolean(PluginConstant.editorTextOperationKey, true);
     }
 
+    /**
+     * 生成宿主侧图片点击 hook 的注入脚本。
+     * 该脚本会在页面已经完成 `new Vditor(...)` 初始化后再次覆盖 `vditor.options.image.preview`，
+     * 从而把图片点击统一回传给 Java 宿主，而不是继续依赖某一份模板里是否手工写了对应回调。
+     * 这样即便运行时命中了旧 external template，只要模板仍然保留 `{{injectScript}}` 注入口，
+     * 宿主也可以在最后一层重新接管图片查看链路。
+     *
+     * @return 可直接拼接到最终注入脚本中的 JavaScript 文本
+     */
+    @NotNull
+    static String buildPreviewImageHookScript() {
+        return "function installMarkdownEditorImagePreviewHook(){\n" +
+                "        if (typeof window.previewSyncBridge !== 'function' || typeof vditor === 'undefined' || !vditor || !vditor.options) {\n" +
+                "            return false;\n" +
+                "        }\n" +
+                "        vditor.options.image = vditor.options.image || {};\n" +
+                "        vditor.options.image.preview = function(image){\n" +
+                "            if (!image || !image.getAttribute) {\n" +
+                "                return;\n" +
+                "            }\n" +
+                "            const imageUrl = image.currentSrc || image.getAttribute('src') || '';\n" +
+                "            if (!imageUrl) {\n" +
+                "                return;\n" +
+                "            }\n" +
+                "            const filePath = typeof currentFilePath === 'string'\n" +
+                "                ? currentFilePath\n" +
+                "                : ((typeof previewSyncState !== 'undefined' && previewSyncState && typeof previewSyncState.currentFilePath === 'string')\n" +
+                "                    ? previewSyncState.currentFilePath\n" +
+                "                    : '');\n" +
+                "            const contentVersion = (typeof previewSyncState !== 'undefined' && previewSyncState && typeof previewSyncState.lastAppliedContentVersion === 'number')\n" +
+                "                ? previewSyncState.lastAppliedContentVersion\n" +
+                "                : 0;\n" +
+                "            const message = {\n" +
+                "                type: 'previewImageRequest',\n" +
+                "                filePath: filePath,\n" +
+                "                contentVersion: contentVersion,\n" +
+                "                timestamp: Date.now(),\n" +
+                "                source: 'user',\n" +
+                "                payload: {\n" +
+                "                    imageUrl: imageUrl,\n" +
+                "                    alt: image.getAttribute('alt') || '',\n" +
+                "                    title: image.getAttribute('title') || ''\n" +
+                "                }\n" +
+                "            };\n" +
+                "            if (typeof debugPreviewSync === 'function') {\n" +
+                "                debugPreviewSync('request preview image from host', message.payload);\n" +
+                "            }\n" +
+                "            window.previewSyncBridge(JSON.stringify(message));\n" +
+                "        };\n" +
+                "        return true;\n" +
+                "    }\n" +
+                "    if (!installMarkdownEditorImagePreviewHook()) {\n" +
+                "        setTimeout(installMarkdownEditorImagePreviewHook, 0);\n" +
+                "    }\n";
+    }
+
+    /**
+     * 生成注入到预览页末尾的宿主脚本。
+     * 这里集中承载复制/剪切/粘贴、焦点处理、统一桥接函数以及图片查看 hook，
+     * 让 Java 侧可以在不改动页面主体初始化代码的前提下，持续增强运行时行为。
+     *
+     * @return 拼接后的完整宿主注入脚本文本
+     */
     public String getInjectScript() {
 
         String savaTime = "function jsAddTime(){saveTime = Date.now() + 1000;}\n";
@@ -430,7 +493,7 @@ public class MarkdownHtmlPanel extends JCEFHtmlPanel {
                 "        }\n" +
                 previewSyncBridgeJSQuery.inject("message") +
                 "    }\n";
-        return savaTime + copy + cut + paste + blur + previewSyncBridge;
+        return savaTime + copy + cut + paste + blur + previewSyncBridge + buildPreviewImageHookScript();
     }
 
     public void browserFind(String txt, boolean forward) {

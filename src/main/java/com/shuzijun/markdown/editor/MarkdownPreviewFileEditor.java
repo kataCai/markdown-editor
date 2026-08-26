@@ -59,6 +59,7 @@ import com.shuzijun.markdown.editor.sync.EditorViewportSyncSupport;
 import com.shuzijun.markdown.editor.sync.PreviewEditorSyncCoordinator;
 import com.shuzijun.markdown.editor.sync.PreviewSyncMessage;
 import com.shuzijun.markdown.model.PluginConstant;
+import com.shuzijun.markdown.ui.ImagePreviewDialogWrapper;
 import com.shuzijun.markdown.util.FileUtils;
 import com.shuzijun.markdown.util.PropertiesUtils;
 import org.apache.commons.lang3.StringUtils;
@@ -125,6 +126,7 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
 
     private final Url servicePath = BuiltInServerManager.getInstance().addAuthToken(Urls.parseEncoded("http://localhost:" + BuiltInServerManager.getInstance().getPort() + PreviewStaticServer.PREFIX));
     private final String templateHtmlFile = "template/default.html";
+    private static final String INJECT_SCRIPT_PLACEHOLDER = "{{injectScript}}";
     private final boolean isPresentableUrl;
     private final String previewUrl;
     private static final int PREVIEW_TO_EDITOR_SUPPRESS_MS = 280;
@@ -411,6 +413,9 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
             case PreviewSyncMessage.TYPE_PREVIEW_SELECTION_CLEARED:
                 handlePreviewSelectionCleared();
                 break;
+            case PreviewSyncMessage.TYPE_PREVIEW_IMAGE_REQUEST:
+                handlePreviewImageRequest(message.getJSONObject("payload"));
+                break;
             default:
                 break;
         }
@@ -652,6 +657,34 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
     }
 
     /**
+     * 处理预览页发起的图片查看请求。
+     * 页面侧只负责上报图片地址与元信息，宿主侧在 IDE 级独立窗口中承接真正的图片浏览，
+     * 这样就不会继续受当前 Markdown 编辑区 JCEF 视口大小限制。
+     *
+     * @param payload 预览页回传的图片查看负载
+     */
+    private void handlePreviewImageRequest(@Nullable JSONObject payload) {
+        if (payload == null) {
+            return;
+        }
+        String imageUrl = payload.getString("imageUrl");
+        if (StringUtils.isBlank(imageUrl)) {
+            return;
+        }
+        String alt = payload.getString("alt");
+        String title = payload.getString("title");
+        ApplicationManager.getApplication().invokeLater(() -> {
+            ImagePreviewDialogWrapper dialogWrapper = new ImagePreviewDialogWrapper(myProject, imageUrl, alt, title);
+            debugSync("open preview image dialog: imageUrl=%s, alt=%s, title=%s, bounds=%s",
+                    imageUrl,
+                    alt,
+                    title,
+                    new Rectangle(dialogWrapper.getInitialLocation(), dialogWrapper.getInitialSize()));
+            dialogWrapper.show();
+        });
+    }
+
+    /**
      * 将预览页回传的锚点来源字符串映射为宿主侧枚举。
      * 未知来源默认按用户滚动处理，避免因前后端升级不同步而把正常回写全部拦掉。
      *
@@ -864,41 +897,91 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
         }
     }
 
+    /**
+     * 组装当前预览页最终要加载的 HTML。
+     * 这里会先读取内置模板，再按需尝试读取 external template，并基于 `{{injectScript}}` 占位符判断
+     * external template 是否仍然具备宿主注入能力。
+     * 如果外部模板缺少这个注入口，就必须立即回退到 bundled template，
+     * 否则图片查看、同步桥接等宿主级能力都会被旧模板直接绕开。
+     *
+     * @param isPresentableUrl 当前项目是否存在可展示路径，用于决定 projectUrl / projectName 的注入值
+     * @param tempPanel        当前新建的预览面板，用于提供宿主侧注入脚本
+     * @return 可直接加载到 JCEF 的最终 HTML
+     */
     private String createHtml(boolean isPresentableUrl, MarkdownHtmlPanel tempPanel) {
-        InputStream inputStream = null;
-
+        File templateFile = new File(PluginConstant.TEMPLATE_PATH + templateHtmlFile);
         try {
-            File templateFile = new File(PluginConstant.TEMPLATE_PATH + templateHtmlFile);
-            if (templateFile.exists()) {
-                inputStream = new FileInputStream(templateFile);
-            } else {
-                inputStream = PreviewStaticServer.class.getResourceAsStream("/" + templateHtmlFile);
+            String bundledTemplate = loadTemplateContent(PreviewStaticServer.class.getResourceAsStream("/" + templateHtmlFile));
+            String externalTemplate = templateFile.exists() ? loadTemplateContent(new FileInputStream(templateFile)) : null;
+            boolean useExternalTemplate = hasInjectScriptPlaceholder(externalTemplate);
+            if (externalTemplate != null && !useExternalTemplate) {
+                LOG.warn("External markdown preview template is missing {{injectScript}} placeholder, fallback to bundled template: " + templateFile.getAbsolutePath());
             }
-            String template = new String(FileUtilRt.loadBytes(inputStream));
+            String template = resolvePreviewTemplate(bundledTemplate, externalTemplate);
+            debugSync("preview template source=%s, path=%s",
+                    useExternalTemplate ? "external" : "bundled",
+                    useExternalTemplate ? templateFile.getAbsolutePath() : ("/" + templateHtmlFile));
             return template.replace("{{service}}", servicePath.getScheme() + URLUtil.SCHEME_SEPARATOR + servicePath.getAuthority() + servicePath.getPath())
                     .replace("{{serverToken}}", StringUtils.isNotBlank(servicePath.getParameters()) ? servicePath.getParameters().substring(1) : "")
                     .replace("{{filePath}}", URL_FRAGMENT_ESCAPER.escape(myFile.getPath()))
                     .replace("{{Lang}}", PropertiesUtils.getInfo("Lang"))
                     .replace("{{darcula}}", isDarkTheme(EditorColorsManager.getInstance().getGlobalScheme().getDefaultBackground()) + "")
-                    .replace("{{userTemplate}}", templateFile.exists() + "")
+                    .replace("{{userTemplate}}", String.valueOf(useExternalTemplate))
                     .replace("{{projectUrl}}", isPresentableUrl ? URL_FRAGMENT_ESCAPER.escape(myProject.getPresentableUrl()) : "")
                     .replace("{{projectName}}", isPresentableUrl ? "" : URL_FRAGMENT_ESCAPER.escape(myProject.getName()))
                     .replace("{{previewToolbarVisible}}", String.valueOf(isPreviewToolbarVisible()))
                     .replace("{{previewEditable}}", String.valueOf(isPreviewEditable()))
                     .replace("{{previewCodeTheme}}", JSONObject.toJSONString(getPreviewCodeTheme()))
                     .replace("{{ideStyle}}", getStyle(true))
-                    .replace("{{injectScript}}", tempPanel.getInjectScript())
-                    ;
+                    .replace(INJECT_SCRIPT_PLACEHOLDER, tempPanel.getInjectScript());
         } catch (IOException e) {
             throw new RuntimeException(e);
-        } finally {
-            if (inputStream != null) {
-                try {
-                    inputStream.close();
-                } catch (IOException ignore) {
-                }
-            }
         }
+    }
+
+    /**
+     * 读取模板文本内容并统一按 UTF-8 解析。
+     * 模板文件中存在中文注释和前端脚本，若继续依赖平台默认编码，
+     * 很容易在不同 IDE / 系统环境下引入不可预期的乱码或脚本替换失败。
+     *
+     * @param inputStream 模板输入流；调用方负责保证来源有效
+     * @return 按 UTF-8 读取后的完整模板文本
+     * @throws IOException 当模板流为空或读取失败时抛出
+     */
+    @NotNull
+    private static String loadTemplateContent(@Nullable InputStream inputStream) throws IOException {
+        if (inputStream == null) {
+            throw new IOException("Markdown preview template stream is null");
+        }
+        try (InputStream templateInputStream = inputStream) {
+            return new String(FileUtilRt.loadBytes(templateInputStream), StandardCharsets.UTF_8);
+        }
+    }
+
+    /**
+     * 解析本次预览应当使用哪一份模板文本。
+     * external template 只有在仍然保留宿主脚本注入口时才允许继续生效，
+     * 否则必须立即回退到 bundled template，避免宿主侧图片预览 hook 和同步桥接被整体绕开。
+     *
+     * @param bundledTemplate 内置模板文本，始终作为最后兜底
+     * @param externalTemplate 外部模板文本；为空时表示运行时没有可用外部模板
+     * @return 最终应当用于组装预览页的模板文本
+     */
+    @NotNull
+    static String resolvePreviewTemplate(@NotNull String bundledTemplate, @Nullable String externalTemplate) {
+        return hasInjectScriptPlaceholder(externalTemplate) ? externalTemplate : bundledTemplate;
+    }
+
+    /**
+     * 判断外部模板是否仍然具备宿主脚本注入能力。
+     * 本次图片查看器改造依赖宿主在运行时强制覆盖 `vditor.options.image.preview`，
+     * 因此模板里必须保留 `{{injectScript}}` 占位符，缺少时就不能再继续沿用。
+     *
+     * @param template 待校验的模板文本
+     * @return {@code true} 表示模板仍然可以安全承接宿主注入，{@code false} 表示必须降级
+     */
+    private static boolean hasInjectScriptPlaceholder(@Nullable String template) {
+        return StringUtils.isNotBlank(template) && template.contains(INJECT_SCRIPT_PLACEHOLDER);
     }
 
     @Override

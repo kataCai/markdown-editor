@@ -292,6 +292,7 @@
         sourceMapBlocks: [],
         blockMappings: [],
         previewScrollListenerBound: false,
+        previewHorizontalWheelListenerBound: false,
         previewSelectionListenerBound: false,
         lastViewportAnchorLine: -1,
         suppressScrollEventUntil: 0,
@@ -1249,6 +1250,33 @@
     }
 
     /**
+     * 将预览图片点击动作转换为结构化同步消息。
+     * 页面侧不直接弹出图片浮层，而是把图片地址、替代文本和标题交给宿主，
+     * 由宿主在 IDE 级独立窗口中完成展示，避免继续受当前编辑区视口限制。
+     *
+     * @param imageElement 被点击的图片元素
+     */
+    function requestPreviewImage(imageElement) {
+        if (!imageElement) {
+            return;
+        }
+        const imageUrl = imageElement.currentSrc || imageElement.src || imageElement.getAttribute("src") || "";
+        if (!imageUrl) {
+            return;
+        }
+        emitPreviewSyncMessage(
+            "previewImageRequest",
+            {
+                imageUrl: imageUrl,
+                alt: imageElement.getAttribute("alt") || "",
+                title: imageElement.getAttribute("title") || ""
+            },
+            "user",
+            previewSyncState.lastRenderedContentVersion || previewSyncState.lastAppliedContentVersion || 0
+        );
+    }
+
+    /**
      * 维护预览页本地脏状态，并在状态变化时回传宿主。
      * 宿主据此在预览页未保存本地编辑期间暂停主动覆盖内容，避免双端编辑冲突。
      */
@@ -1283,6 +1311,117 @@
      */
     function getPreviewScrollContainer() {
         return getCurrentModeElement();
+    }
+
+    /**
+     * 将 wheel 事件目标归一化为元素节点。
+     * document 级监听收到的目标可能是文本节点，必须先回退到父元素后再做滚动宿主判断。
+     *
+     * @param eventTarget wheel 事件原始目标
+     * @return 可用于 DOM contains / scroll 判定的元素节点
+     */
+    function normalizeWheelEventTarget(eventTarget) {
+        if (!eventTarget) {
+            return null;
+        }
+        return eventTarget.nodeType === Node.ELEMENT_NODE ? eventTarget : eventTarget.parentElement;
+    }
+
+    /**
+     * 计算 wheel 事件中真正需要接管的横向位移。
+     * 这里只在横向意图明显时返回非零值，避免把普通纵向滚轮误当成横向滚动接管。
+     *
+     * @param event wheel 事件
+     * @return 横向位移；无横向意图时返回 0
+     */
+    function getHorizontalWheelDelta(event) {
+        if (!event) {
+            return 0;
+        }
+        const deltaX = typeof event.deltaX === "number" ? event.deltaX : 0;
+        const deltaY = typeof event.deltaY === "number" ? event.deltaY : 0;
+        if (Math.abs(deltaX) >= Math.abs(deltaY) && deltaX !== 0) {
+            return deltaX;
+        }
+        if (event.shiftKey && deltaY !== 0) {
+            return deltaY;
+        }
+        return 0;
+    }
+
+    /**
+     * 判断当前元素是否存在横向滚动空间。
+     * 该判断同时用于 code block、表格和预览外层容器，优先把事件转交给真正能水平滚动的宿主。
+     *
+     * @param element 待检查的元素
+     * @return 存在横向滚动空间时返回 true
+     */
+    function isHorizontallyScrollable(element) {
+        return !!element && element.scrollWidth - element.clientWidth > 1;
+    }
+
+    /**
+     * 从事件目标向上查找可承接横向滚轮的滚动宿主。
+     * 这里优先选择最近的横向可滚动元素，并在无法继续向目标方向滚动时继续回退到外层宿主，
+     * 这样既能保持代码块和表格内部的滚动体验，也能避免横向滚动在边界处被错误吞掉。
+     *
+     * @param targetElement wheel 事件目标元素
+     * @param stopElement    当前模式的根滚动容器
+     * @param appliedDelta   需要实际写入 scrollLeft 的位移
+     * @return 可承接横向滚动的元素；不存在时返回 null
+     */
+    function findHorizontalScrollHost(targetElement, stopElement, appliedDelta) {
+        let element = targetElement;
+        while (element) {
+            if (isHorizontallyScrollable(element)) {
+                const nextScrollLeft = element.scrollLeft + appliedDelta;
+                const maxScrollLeft = element.scrollWidth - element.clientWidth;
+                if (nextScrollLeft >= 0 && nextScrollLeft <= maxScrollLeft) {
+                    return element;
+                }
+            }
+            if (element === stopElement) {
+                break;
+            }
+            element = element.parentElement;
+        }
+        return null;
+    }
+
+    /**
+     * 归一化预览正文区域的横向 wheel 方向。
+     * 只在当前模式正文内部接管横向意图，并把浏览器默认的方向反转为更符合用户直觉的方向，
+     * 纵向滚轮、Mermaid 查看层和非正文区域保持原样。
+     */
+    function bindPreviewHorizontalWheelNormalization() {
+        if (previewSyncState.previewHorizontalWheelListenerBound) {
+            return;
+        }
+        previewSyncState.previewHorizontalWheelListenerBound = true;
+        document.addEventListener("wheel", function (event) {
+            const currentModeElement = getCurrentModeElement();
+            const eventTarget = normalizeWheelEventTarget(event && event.target);
+            if (!currentModeElement || !eventTarget || !currentModeElement.contains(eventTarget)) {
+                return;
+            }
+            if (isMermaidPreviewViewerEventTarget(eventTarget)) {
+                return;
+            }
+            const horizontalDelta = getHorizontalWheelDelta(event);
+            if (horizontalDelta === 0) {
+                return;
+            }
+            const appliedDelta = -horizontalDelta;
+            const scrollHost = findHorizontalScrollHost(eventTarget, currentModeElement, appliedDelta);
+            if (!scrollHost) {
+                return;
+            }
+            event.preventDefault();
+            scrollHost.scrollLeft = Math.max(0, Math.min(
+                scrollHost.scrollWidth - scrollHost.clientWidth,
+                scrollHost.scrollLeft + appliedDelta
+            ));
+        }, {capture: true, passive: false});
     }
 
     /**
@@ -2393,10 +2532,16 @@
                 return responseText;
             }
         },
+        "image": {
+            preview(image) {
+                requestPreviewImage(image);
+            }
+        },
         "value": initValue(),
         after() {
             fileValue = vditor.getValue()
             bindReadonlyInteractionGuards();
+            bindPreviewHorizontalWheelNormalization();
             bindPreviewSyncListeners();
             initToolbarExtensions();
             ensureMermaidPreviewMutationObserver();

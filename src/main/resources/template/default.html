@@ -1361,6 +1361,39 @@
     }
 
     /**
+     * 计算元素当前允许的最大 scrollLeft。
+     * 内容没有横向溢出时返回 0，避免把亚像素负值写进滚动位置。
+     *
+     * @param element 待计算的滚动元素
+     * @return 最大横向滚动偏移
+     */
+    function getMaxScrollLeft(element) {
+        if (!element) {
+            return 0;
+        }
+        return Math.max(0, element.scrollWidth - element.clientWidth);
+    }
+
+    /**
+     * 判断元素在目标方向上是否还剩可滚动距离。
+     * 只判断能不能再动，不要求整档位移都落在区间内。
+     * 已经贴住边界时返回 false，调用方继续向外层宿主查找。
+     *
+     * @param element      待检查的滚动元素
+     * @param appliedDelta 需要写入 scrollLeft 的位移，向起点为负
+     * @return 该方向上还剩可滚距离时返回 true
+     */
+    function canConsumeHorizontalDelta(element, appliedDelta) {
+        if (!isHorizontallyScrollable(element) || !appliedDelta) {
+            return false;
+        }
+        if (appliedDelta < 0) {
+            return element.scrollLeft > 0;
+        }
+        return element.scrollLeft < getMaxScrollLeft(element);
+    }
+
+    /**
      * 从事件目标向上查找可承接横向滚轮的滚动宿主。
      * 这里优先选择最近的横向可滚动元素，并在无法继续向目标方向滚动时继续回退到外层宿主，
      * 这样既能保持代码块和表格内部的滚动体验，也能避免横向滚动在边界处被错误吞掉。

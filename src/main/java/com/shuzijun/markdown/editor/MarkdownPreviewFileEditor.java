@@ -14,21 +14,18 @@ import com.intellij.openapi.actionSystem.DefaultActionGroup;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.editor.Document;
-import com.intellij.openapi.editor.Editor;
 import com.intellij.openapi.editor.colors.EditorColorsListener;
 import com.intellij.openapi.editor.colors.EditorColorsManager;
 import com.intellij.openapi.editor.colors.EditorColorsScheme;
 import com.intellij.openapi.editor.colors.impl.EditorColorsSchemeImpl;
 import com.intellij.openapi.editor.event.DocumentListener;
 import com.intellij.openapi.editor.event.EditorEventMulticaster;
-import com.intellij.openapi.fileEditor.FileEditorManager;
 import com.intellij.openapi.fileEditor.FileEditorManagerEvent;
 import com.intellij.openapi.fileEditor.FileEditorManagerListener;
 import com.intellij.openapi.fileEditor.FileDocumentManager;
 import com.intellij.openapi.fileEditor.FileEditor;
 import com.intellij.openapi.fileEditor.FileEditorLocation;
 import com.intellij.openapi.fileEditor.FileEditorState;
-import com.intellij.openapi.fileEditor.OpenFileDescriptor;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.util.UserDataHolderBase;
@@ -49,9 +46,6 @@ import com.intellij.util.io.URLUtil;
 import com.intellij.util.messages.MessageBusConnection;
 import com.shuzijun.markdown.controller.FileApplicationService;
 import com.shuzijun.markdown.controller.PreviewStaticServer;
-import com.shuzijun.markdown.editor.sync.EditorActivationSyncSupport;
-import com.shuzijun.markdown.editor.sync.EditorActivationTransitionSupport;
-import com.shuzijun.markdown.editor.sync.EditorViewportSyncSupport;
 import com.shuzijun.markdown.editor.sync.PreviewEditorSyncCoordinator;
 import com.shuzijun.markdown.editor.sync.PreviewSyncMessage;
 import com.shuzijun.markdown.model.PluginConstant;
@@ -125,8 +119,6 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
     private static final String INJECT_SCRIPT_PLACEHOLDER = "{{injectScript}}";
     private final boolean isPresentableUrl;
     private final String previewUrl;
-    private static final int PREVIEW_TO_EDITOR_SUPPRESS_MS = 280;
-    private static final int EDITOR_TO_PREVIEW_SUPPRESS_MS = 280;
     /**
      * 预览同步协调器。
      * 该对象集中维护内容版本、预览页 ready/rendered 状态以及 reveal 挂起/补发逻辑，
@@ -375,94 +367,6 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
     }
 
     /**
-     * 将给定源码编辑器的当前位置同步到预览页。
-     * 当前实现先用逻辑行号 + 可视区相对比例形成最小联动闭环，后续再叠加更精细的顶部/底部对齐策略。
-     *
-     * @param editor 当前参与联动的源码编辑器
-     * @param reason 触发原因，例如 caret、scroll、activation
-     */
-    private void revealPreviewForEditor(@NotNull Editor editor, @NotNull String reason) {
-        EditorViewportSyncSupport.ViewportAnchor viewportAnchor = resolveEditorViewportAnchor(editor, reason);
-        int line = viewportAnchor.getLine();
-        double topRatio = calculateEditorTopRatio(editor, line);
-        long now = System.currentTimeMillis();
-        if (!"activation".equals(reason) && syncCoordinator.getState().shouldSkipDuplicatedEditorReveal(line, topRatio, now)) {
-            return;
-        }
-        syncCoordinator.getState().updateEditorAnchor(line, topRatio);
-        syncCoordinator.getState().recordEditorRevealDispatch(line, topRatio, now);
-        syncCoordinator.getState().suppressPreviewEventsUntil(now + EDITOR_TO_PREVIEW_SUPPRESS_MS);
-        debugSync("reveal preview for editor: reason=%s, line=%s, topRatio=%.3f", reason, line, topRatio);
-        dispatchPreviewMessages(syncCoordinator.requestRevealSourceLine(line, topRatio, reason));
-    }
-
-    /**
-     * 解析当前源码编辑器在本次事件下应同步到预览页的语义锚点。
-     * 光标事件使用 caret 行；滚动事件按顶部/中线/底部策略取锚点，减少 `sv` 模式和长文档中的跳动感。
-     *
-     * @param editor 当前参与联动的源码编辑器
-     * @param reason 触发原因，例如 caret、scroll、activation
-     * @return 当前事件应使用的视口语义锚点
-     */
-    @NotNull
-    private EditorViewportSyncSupport.ViewportAnchor resolveEditorViewportAnchor(@NotNull Editor editor, @NotNull String reason) {
-        Rectangle visibleArea = editor.getScrollingModel().getVisibleArea();
-        int topLine = editor.xyToLogicalPosition(new Point(visibleArea.x, visibleArea.y)).line;
-        int bottomLine = editor.xyToLogicalPosition(new Point(visibleArea.x, Math.max(visibleArea.y, visibleArea.y + Math.max(visibleArea.height - 1, 0)))).line;
-        int middleLine = editor.xyToLogicalPosition(new Point(visibleArea.x, visibleArea.y + Math.max(visibleArea.height / 2, 0))).line;
-        int caretLine = editor.getCaretModel().getLogicalPosition().line;
-        return EditorViewportSyncSupport.resolveAnchor(
-                reason,
-                caretLine,
-                topLine,
-                bottomLine,
-                middleLine,
-                editor.getDocument().getLineCount()
-        );
-    }
-
-    /**
-     * 计算指定源码逻辑行在当前可视区中的相对高度比例。
-     * 该比例用于让预览页尽量以与源码编辑器一致的视口语义位置显示目标内容。
-     *
-     * @param editor 当前源码编辑器
-     * @param line   需要换算的逻辑行号
-     * @return 0 到 1 之间的相对比例；若当前可视区高度无效，则返回 0
-     */
-    private double calculateEditorTopRatio(@NotNull Editor editor, int line) {
-        Rectangle visibleArea = editor.getScrollingModel().getVisibleArea();
-        if (visibleArea.height <= 0) {
-            return 0d;
-        }
-        Point linePoint = editor.logicalPositionToXY(new com.intellij.openapi.editor.LogicalPosition(Math.max(line, 0), 0));
-        double ratio = (linePoint.y - visibleArea.y) / (double) visibleArea.height;
-        if (ratio < 0d) {
-            return 0d;
-        }
-        if (ratio > 1d) {
-            return 1d;
-        }
-        return ratio;
-    }
-
-    /**
-     * 判断给定编辑器是否是当前文件在当前项目中的主源码编辑器事件来源。
-     * 这里先按“同项目 + 同文档 + 当前选中文本编辑器”收敛，避免其他文件或后台编辑器污染联动状态。
-     *
-     * @param editor 待判断的编辑器
-     * @return {@code true} 表示该编辑器事件可参与当前预览联动
-     */
-    private boolean isPrimarySourceEditor(@Nullable Editor editor) {
-        if (editor == null || editor.isDisposed()) {
-            return false;
-        }
-        if (editor.getProject() != myProject || editor.getDocument() != myDocument) {
-            return false;
-        }
-        return editor == FileEditorManager.getInstance(myProject).getSelectedTextEditor();
-    }
-
-    /**
      * 将协调器产出的结构化消息逐条发送给当前预览页。
      *
      * @param messages 待发送的消息列表
@@ -474,61 +378,6 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
         for (PreviewSyncMessage message : messages) {
             myPanel.sendPreviewSyncMessage(message);
         }
-    }
-
-    /**
-     * 将源码编辑器定位到指定逻辑行。
-     * 当前实现先恢复到该行附近，后续再根据预览选区范围补充更精细的区间可见性对齐。
-     *
-     * @param line 目标逻辑行号
-     */
-    private void revealSourceEditorLine(@NotNull Editor editor, int line) {
-        long nowMillis = System.currentTimeMillis();
-        if (shouldSkipSourceRestore(editor, line, nowMillis)) {
-            debugSync("skip source restore as no-op: targetLine=%s, visibleTopBottom=%s-%s",
-                    line,
-                    editor.xyToLogicalPosition(new Point(editor.getScrollingModel().getVisibleArea().x, editor.getScrollingModel().getVisibleArea().y)).line,
-                    editor.xyToLogicalPosition(new Point(
-                            editor.getScrollingModel().getVisibleArea().x,
-                            editor.getScrollingModel().getVisibleArea().y + Math.max(editor.getScrollingModel().getVisibleArea().height - 1, 0)
-                    )).line);
-            return;
-        }
-        syncCoordinator.getState().recordSourceRestore(line, nowMillis);
-        syncCoordinator.getState().suppressEditorEventsUntil(nowMillis + PREVIEW_TO_EDITOR_SUPPRESS_MS);
-        debugSync("reveal source editor: targetLine=%s", line);
-        FileEditorManager.getInstance(myProject).openTextEditor(
-                new OpenFileDescriptor(myProject, myFile, Math.max(line, 0), 0).setUseCurrentWindow(true),
-                true
-        );
-    }
-
-    /**
-     * 判断本次“切回源码编辑器”的恢复定位是否属于无效恢复。
-     * 当前会拦截两类情况：
-     * 1. 目标行本来就在可视区内，此时再次恢复只会制造抖动；
-     * 2. 极短时间内对同一目标行重复恢复，此时大概率属于激活回声或布局抖动。
-     *
-     * @param editor     当前源码编辑器
-     * @param targetLine 本次准备恢复的目标逻辑行号
-     * @param nowMillis  当前时间戳
-     * @return {@code true} 表示应跳过本次恢复，避免无意义跳动
-     */
-    private boolean shouldSkipSourceRestore(@NotNull Editor editor, int targetLine, long nowMillis) {
-        Rectangle visibleArea = editor.getScrollingModel().getVisibleArea();
-        int topLine = editor.xyToLogicalPosition(new Point(visibleArea.x, visibleArea.y)).line;
-        int bottomLine = editor.xyToLogicalPosition(new Point(
-                visibleArea.x,
-                visibleArea.y + Math.max(visibleArea.height - 1, 0)
-        )).line;
-        return EditorActivationSyncSupport.shouldSkipSourceRestore(
-                topLine,
-                bottomLine,
-                targetLine,
-                syncCoordinator.getState().getLastRestoredSourceLine(),
-                syncCoordinator.getState().getLastRestoredSourceAt(),
-                nowMillis
-        );
     }
 
     /**

@@ -312,36 +312,6 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
                 }
                 if (event.getNewEditor() == MarkdownPreviewFileEditor.this) {
                     scheduleContentSync("activation");
-                    Editor editor = FileEditorManager.getInstance(myProject).getSelectedTextEditor();
-                    if (editor != null && editor.getDocument() == myDocument) {
-                        revealPreviewForEditor(editor, "activation");
-                    }
-                    return;
-                }
-                if (event.getNewEditor() instanceof com.intellij.openapi.fileEditor.TextEditor) {
-                    boolean shouldRestore = EditorActivationTransitionSupport.shouldRestoreSourceFromPreview(
-                            event.getOldEditor() == MarkdownPreviewFileEditor.this,
-                            true
-                    );
-                    Editor sourceEditor = ((com.intellij.openapi.fileEditor.TextEditor) event.getNewEditor()).getEditor();
-                    if (sourceEditor.getDocument() != myDocument) {
-                        return;
-                    }
-                    if (!shouldRestore) {
-                        debugSync("skip source activation restore: oldEditorIsPreview=%s, newEditor=%s",
-                                event.getOldEditor() == MarkdownPreviewFileEditor.this,
-                                event.getNewEditor().getClass().getSimpleName());
-                        return;
-                    }
-                    int targetLine = syncCoordinator.getState().resolveSourceActivationTargetLine();
-                    debugSync("source activation restore target=%s, previewSelectionStart=%s, previewAnchorLine=%s, previewAnchorKind=%s",
-                            targetLine,
-                            syncCoordinator.getState().getPreviewSelectionStartLine(),
-                            syncCoordinator.getState().getPreviewAnchorLine(),
-                            syncCoordinator.getState().getPreviewAnchorKind());
-                    if (targetLine >= 0) {
-                        revealSourceEditorLine(sourceEditor, targetLine);
-                    }
                 }
             }
         });

@@ -19,12 +19,8 @@ import com.intellij.openapi.editor.colors.EditorColorsListener;
 import com.intellij.openapi.editor.colors.EditorColorsManager;
 import com.intellij.openapi.editor.colors.EditorColorsScheme;
 import com.intellij.openapi.editor.colors.impl.EditorColorsSchemeImpl;
-import com.intellij.openapi.editor.event.CaretEvent;
-import com.intellij.openapi.editor.event.CaretListener;
 import com.intellij.openapi.editor.event.DocumentListener;
 import com.intellij.openapi.editor.event.EditorEventMulticaster;
-import com.intellij.openapi.editor.event.VisibleAreaEvent;
-import com.intellij.openapi.editor.event.VisibleAreaListener;
 import com.intellij.openapi.fileEditor.FileEditorManager;
 import com.intellij.openapi.fileEditor.FileEditorManagerEvent;
 import com.intellij.openapi.fileEditor.FileEditorManagerListener;
@@ -292,8 +288,8 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
 
     /**
      * 初始化宿主侧同步基础设施。
-     * 这里集中绑定文档变更、源码编辑器滚动/光标变化以及文件编辑器激活切换等监听入口，
-     * 为后续“源码 <-> 预览”联动提供统一事件源。
+     * 这里只绑定文档变更和文件编辑器激活切换。
+     * 编辑页滚动和光标移动不再驱动预览页滚动。
      */
     private void initSyncInfrastructure() {
         EditorEventMulticaster eventMulticaster = com.intellij.openapi.editor.EditorFactory.getInstance().getEventMulticaster();
@@ -304,32 +300,6 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
                     return;
                 }
                 scheduleContentSync("documentChanged");
-            }
-        }, this);
-        eventMulticaster.addCaretListener(new CaretListener() {
-            @Override
-            public void caretPositionChanged(@NotNull CaretEvent event) {
-                Editor editor = event.getEditor();
-                if (!isPrimarySourceEditor(editor)) {
-                    return;
-                }
-                if (syncCoordinator.getState().isEditorEventSuppressed(System.currentTimeMillis())) {
-                    return;
-                }
-                revealPreviewForEditor(editor, "caret");
-            }
-        }, this);
-        eventMulticaster.addVisibleAreaListener(new VisibleAreaListener() {
-            @Override
-            public void visibleAreaChanged(@NotNull VisibleAreaEvent event) {
-                Editor editor = event.getEditor();
-                if (!isPrimarySourceEditor(editor)) {
-                    return;
-                }
-                if (syncCoordinator.getState().isEditorEventSuppressed(System.currentTimeMillis())) {
-                    return;
-                }
-                revealPreviewForEditor(editor, "scroll");
             }
         }, this);
 

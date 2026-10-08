@@ -378,6 +378,11 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
      * @param reason 触发原因，用于调试和后续扩展时识别入口
      */
     private void scheduleContentSync(@NotNull String reason) {
+        long stamp = myDocument.getModificationStamp();
+        if ("activation".equals(reason) && stamp == syncCoordinator.getState().getContentVersion()) {
+            tracePreviewTab("contentSync reason=activation, stamp=" + stamp + ", applyMarkdown=false");
+            return;
+        }
         contentSyncAlarm.cancelAllRequests();
         contentSyncAlarm.addRequest(() -> {
             List<PreviewSyncMessage> messages = syncCoordinator.updateDocument(myDocument.getText(), myDocument.getModificationStamp());

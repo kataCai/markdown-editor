@@ -544,6 +544,15 @@
 
     function editFocus(md) {
         const scrollTopBefore = readPreviewScrollMetrics().scrollTop;
+        if (!window.previewEditable) {
+            traceEditFocus({
+                readonlySkipped: true,
+                setValue: false,
+                scrollTopBefore: scrollTopBefore,
+                scrollTopAfter: scrollTopBefore
+            });
+            return;
+        }
         if (Date.now() <= saveTime) {
             traceEditFocus({
                 skipped: "saveTime",
@@ -556,18 +565,20 @@
         }
         $.get(fileUrl, function (data) {
             const beforeSet = readPreviewScrollMetrics().scrollTop;
+            const sameAsLastHost = previewSyncState.lastHostMarkdown === data;
             let didSetValue = false;
-            if (md !== data) {
+            if (!sameAsLastHost) {
                 vditor.setValue(data);
                 didSetValue = true;
                 fileValue = vditor.getValue();
+                previewSyncState.lastHostMarkdown = data;
                 syncedTip(true, data)
                 setPreviewDirtyState(false, "programmatic");
                 schedulePreviewSyncArtifactsRebuild("editFocus");
             }
             traceEditFocus({
                 readonlySkipped: false,
-                sameAsLastHost: previewSyncState.lastHostMarkdown === data,
+                sameAsLastHost: sameAsLastHost,
                 setValue: didSetValue,
                 scrollTopBefore: beforeSet,
                 scrollTopAfter: readPreviewScrollMetrics().scrollTop
@@ -2287,6 +2298,17 @@
         const getValueEqualsHost = currentValue === markdown;
         const lastHostEqualsHost = previewSyncState.lastHostMarkdown === markdown;
         const scrollTopBefore = readPreviewScrollMetrics().scrollTop;
+        if (lastHostEqualsHost) {
+            traceApplyMarkdown({
+                markdownLength: markdown.length,
+                getValueEqualsHost: getValueEqualsHost,
+                lastHostEqualsHost: true,
+                setValue: false,
+                scrollTopBefore: scrollTopBefore,
+                scrollTopAfter: scrollTopBefore
+            });
+            return;
+        }
         previewSyncState.applyingMarkdown = true;
         let didSetValue = false;
         try {
@@ -2310,7 +2332,7 @@
         traceApplyMarkdown({
             markdownLength: markdown.length,
             getValueEqualsHost: getValueEqualsHost,
-            lastHostEqualsHost: lastHostEqualsHost,
+            lastHostEqualsHost: false,
             setValue: didSetValue,
             scrollTopBefore: scrollTopBefore,
             scrollTopAfter: readPreviewScrollMetrics().scrollTop

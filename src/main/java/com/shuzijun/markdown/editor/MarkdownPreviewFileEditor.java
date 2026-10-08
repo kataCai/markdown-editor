@@ -533,7 +533,7 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
 
     /**
      * 处理预览页滚动后回写的源码锚点。
-     * 当前阶段优先恢复到对应逻辑行附近，并更新宿主状态中的最近预览锚点。
+     * 这里只更新宿主缓存，不再滚动源码编辑器。
      *
      * @param payload 预览页回传的结构化 payload
      */
@@ -551,15 +551,11 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
                 payload.getString("sourceId"),
                 resolvePreviewAnchorKind(payload.getString("anchorKind"))
         );
-        Editor selectedEditor = FileEditorManager.getInstance(myProject).getSelectedTextEditor();
-        if (selectedEditor != null && selectedEditor.getDocument() == myDocument) {
-            revealSourceEditorLine(selectedEditor, anchorLine);
-        }
     }
 
     /**
      * 处理预览页选区变化回写。
-     * 当前实现先记录选区的源码行范围，并在源码编辑器处于当前活动态时恢复到选区起始行附近。
+     * 这里只记录选区的源码行范围，不再把源码编辑器拉到选区起始行。
      *
      * @param payload 预览页回传的结构化 payload
      */
@@ -581,10 +577,6 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
                 payload.getIntValue("endLine"),
                 payload.getString("selectedTextPreview")
         );
-        Editor selectedEditor = FileEditorManager.getInstance(myProject).getSelectedTextEditor();
-        if (selectedEditor != null && selectedEditor.getDocument() == myDocument) {
-            revealSourceEditorLine(selectedEditor, payload.getIntValue("startLine"));
-        }
     }
 
     /**

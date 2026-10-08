@@ -1442,14 +1442,12 @@
             }
             const appliedDelta = -horizontalDelta;
             const scrollHost = findHorizontalScrollHost(eventTarget, currentModeElement, appliedDelta);
+            event.preventDefault();
             if (!scrollHost) {
                 return;
             }
-            event.preventDefault();
-            scrollHost.scrollLeft = Math.max(0, Math.min(
-                scrollHost.scrollWidth - scrollHost.clientWidth,
-                scrollHost.scrollLeft + appliedDelta
-            ));
+            const maxScrollLeft = getMaxScrollLeft(scrollHost);
+            scrollHost.scrollLeft = Math.max(0, Math.min(maxScrollLeft, scrollHost.scrollLeft + appliedDelta));
         }, {capture: true, passive: false});
     }
 

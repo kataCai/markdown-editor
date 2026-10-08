@@ -42,6 +42,11 @@ public class PreviewSyncMessage {
      * 宿主通知页面在切回预览后采样当前滚动位置。
      */
     public static final String TYPE_SAMPLE_PREVIEW_TAB = "samplePreviewTabScroll";
+    /**
+     * 宿主通知页面记下或写回预览自己的 scrollTop。
+     * payload.restore 为 false 时只记录，为 true 时在没有 setValue 的前提下写回。
+     */
+    public static final String TYPE_HOLD_PREVIEW_SCROLL = "holdPreviewScroll";
 
     private final String type;
     private final String filePath;
@@ -160,18 +165,6 @@ public class PreviewSyncMessage {
     }
 
     /**
-     * 创建 revealSourceLine 指令。
-     * 该指令用于宿主驱动预览页滚动到某条源码语义行附近，并尽量保持与源码视口相似的相对位置。
-     *
-     * @param filePath       当前文档路径
-     * @param contentVersion 当前内容版本
-     * @param source         来源标记
-     * @param line           目标源码行
-     * @param topRatio       目标行在可视区内的相对位置比例
-     * @param reason         触发原因，例如 caret、scroll、activation
-     * @return 结构化消息对象
-     */
-    /**
      * 创建切回预览后的滚动采样指令。
      * 页面收到后延迟读取 scrollTop，再通过 {@link #TYPE_PREVIEW_TAB_TRACE} 回传。
      *
@@ -189,6 +182,39 @@ public class PreviewSyncMessage {
         );
     }
 
+    /**
+     * 创建预览滚动位置保持指令。
+     * 只携带是否写回，不携带编辑器行号。
+     *
+     * @param filePath 当前文档路径
+     * @param restore  {@code true} 表示写回页面自己记下的 scrollTop
+     * @return 结构化消息对象
+     */
+    public static PreviewSyncMessage holdPreviewScroll(String filePath, boolean restore) {
+        JSONObject payload = new JSONObject();
+        payload.put("restore", restore);
+        return new PreviewSyncMessage(
+                TYPE_HOLD_PREVIEW_SCROLL,
+                filePath,
+                0L,
+                System.currentTimeMillis(),
+                "activation",
+                payload
+        );
+    }
+
+    /**
+     * 创建 revealSourceLine 指令。
+     * 该指令用于宿主驱动预览页滚动到某条源码语义行附近，并尽量保持与源码视口相似的相对位置。
+     *
+     * @param filePath       当前文档路径
+     * @param contentVersion 当前内容版本
+     * @param source         来源标记
+     * @param line           目标源码行
+     * @param topRatio       目标行在可视区内的相对位置比例
+     * @param reason         触发原因，例如 caret、scroll、activation
+     * @return 结构化消息对象
+     */
     public static PreviewSyncMessage revealSourceLine(String filePath,
                                                       long contentVersion,
                                                       String source,

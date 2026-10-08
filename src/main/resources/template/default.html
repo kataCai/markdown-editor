@@ -310,7 +310,9 @@
         viewportThrottleTimer: 0,
         selectionThrottleTimer: 0,
         lastHostMarkdown: null,
-        previewTabSampleTimer: 0
+        previewTabSampleTimer: 0,
+        savedScrollTop: null,
+        setValueSinceCapture: false
     };
     /**
      * Mermaid 预览增强所需的固定 class、attribute 与缩放边界。
@@ -568,6 +570,7 @@
             const sameAsLastHost = previewSyncState.lastHostMarkdown === data;
             let didSetValue = false;
             if (!sameAsLastHost) {
+                previewSyncState.setValueSinceCapture = true;
                 vditor.setValue(data);
                 didSetValue = true;
                 fileValue = vditor.getValue();
@@ -1301,15 +1304,63 @@
      * 切回预览后延迟一帧布局，再上报 scrollTop。
      * 延迟用来看到 JCEF 重新显示后的最终位置，而不是切换瞬间的中间值。
      */
+    function rememberStablePreviewScrollTop() {
+        if (previewSyncState.setValueSinceCapture) {
+            return;
+        }
+        const metrics = readPreviewScrollMetrics();
+        if (metrics.clientHeight > 0 && typeof metrics.scrollTop === "number") {
+            previewSyncState.savedScrollTop = metrics.scrollTop;
+        }
+    }
+
+    /**
+     * 在没有重建正文时，把切走前记下的 scrollTop 写回当前滚动容器。
+     * 只使用页面自己的像素值。
+     */
+    function writeSavedPreviewScrollTop() {
+        if (previewSyncState.setValueSinceCapture) {
+            return false;
+        }
+        const saved = previewSyncState.savedScrollTop;
+        const container = getPreviewScrollContainer();
+        if (!container || typeof saved !== "number" || container.scrollTop === saved) {
+            return false;
+        }
+        container.scrollTop = saved;
+        return true;
+    }
+
+    function capturePreviewScrollTop() {
+        previewSyncState.setValueSinceCapture = false;
+        rememberStablePreviewScrollTop();
+        const metrics = readPreviewScrollMetrics();
+        tracePreviewTab({
+            stage: "captureScroll",
+            scrollTop: previewSyncState.savedScrollTop,
+            clientHeight: metrics.clientHeight,
+            setValue: false
+        });
+    }
+
+    function restorePreviewScrollTop() {
+        writeSavedPreviewScrollTop();
+        setTimeout(function () {
+            writeSavedPreviewScrollTop();
+        }, 50);
+    }
+
     function schedulePreviewTabVisibleSample() {
         clearTimeout(previewSyncState.previewTabSampleTimer);
         previewSyncState.previewTabSampleTimer = setTimeout(function () {
+            const restored = writeSavedPreviewScrollTop();
             const metrics = readPreviewScrollMetrics();
             tracePreviewTab({
                 stage: "visible-300ms",
                 scrollTop: metrics.scrollTop,
                 clientHeight: metrics.clientHeight,
-                setValue: false
+                restored: restored,
+                setValue: previewSyncState.setValueSinceCapture
             });
         }, 300);
     }
@@ -2193,6 +2244,7 @@
                 if (!container || event.target !== container) {
                     return;
                 }
+                rememberStablePreviewScrollTop();
                 clearTimeout(previewSyncState.viewportThrottleTimer);
                 previewSyncState.viewportThrottleTimer = setTimeout(function () {
                     emitPreviewViewportChanged();
@@ -2313,6 +2365,7 @@
         let didSetValue = false;
         try {
             if (!getValueEqualsHost) {
+                previewSyncState.setValueSinceCapture = true;
                 vditor.setValue(markdown);
                 didSetValue = true;
             }
@@ -2518,6 +2571,13 @@
                     break;
                 case "samplePreviewTabScroll":
                     schedulePreviewTabVisibleSample();
+                    break;
+                case "holdPreviewScroll":
+                    if (message.payload && message.payload.restore) {
+                        restorePreviewScrollTop();
+                    } else {
+                        capturePreviewScrollTop();
+                    }
                     break;
                 default:
                     break;

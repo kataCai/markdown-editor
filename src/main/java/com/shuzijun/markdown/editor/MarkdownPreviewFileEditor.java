@@ -310,6 +310,10 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
         editorSelectionConnection.subscribe(FileEditorManagerListener.FILE_EDITOR_MANAGER, new FileEditorManagerListener() {
             @Override
             public void selectionChanged(@NotNull FileEditorManagerEvent event) {
+                if (event.getOldEditor() == MarkdownPreviewFileEditor.this
+                        && event.getNewEditor() != MarkdownPreviewFileEditor.this) {
+                    dispatchHoldPreviewScroll(false);
+                }
                 if (event.getNewFile() != null && !myFile.equals(event.getNewFile())) {
                     tracePreviewTab("selection sameFile=false, old=" + editorTraceName(event.getOldEditor())
                             + ", new=" + editorTraceName(event.getNewEditor()));
@@ -317,6 +321,7 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
                 }
                 traceFileEditorSelection(event);
                 if (event.getNewEditor() == MarkdownPreviewFileEditor.this) {
+                    dispatchHoldPreviewScroll(true);
                     dispatchPreviewMessages(Collections.singletonList(PreviewSyncMessage.samplePreviewTab(myFile.getPath())));
                     scheduleContentSync("activation");
                 }
@@ -398,6 +403,10 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
      *
      * @param messages 待发送的消息列表
      */
+    private void dispatchHoldPreviewScroll(boolean restore) {
+        dispatchPreviewMessages(Collections.singletonList(PreviewSyncMessage.holdPreviewScroll(myFile.getPath(), restore)));
+    }
+
     private void dispatchPreviewMessages(@NotNull java.util.List<PreviewSyncMessage> messages) {
         if (myPanel == null || messages.isEmpty()) {
             return;

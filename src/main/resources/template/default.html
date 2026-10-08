@@ -308,7 +308,9 @@
         lastProgrammaticScrollAt: 0,
         lastProgrammaticScrollReason: "",
         viewportThrottleTimer: 0,
-        selectionThrottleTimer: 0
+        selectionThrottleTimer: 0,
+        lastHostMarkdown: null,
+        previewTabSampleTimer: 0
     };
     /**
      * Mermaid 预览增强所需的固定 class、attribute 与缩放边界。
@@ -541,17 +543,35 @@
     }
 
     function editFocus(md) {
+        const scrollTopBefore = readPreviewScrollMetrics().scrollTop;
         if (Date.now() <= saveTime) {
+            traceEditFocus({
+                skipped: "saveTime",
+                readonlySkipped: false,
+                setValue: false,
+                scrollTopBefore: scrollTopBefore,
+                scrollTopAfter: scrollTopBefore
+            });
             return;
         }
         $.get(fileUrl, function (data) {
+            const beforeSet = readPreviewScrollMetrics().scrollTop;
+            let didSetValue = false;
             if (md !== data) {
                 vditor.setValue(data);
+                didSetValue = true;
                 fileValue = vditor.getValue();
                 syncedTip(true, data)
                 setPreviewDirtyState(false, "programmatic");
                 schedulePreviewSyncArtifactsRebuild("editFocus");
             }
+            traceEditFocus({
+                readonlySkipped: false,
+                sameAsLastHost: previewSyncState.lastHostMarkdown === data,
+                setValue: didSetValue,
+                scrollTopBefore: beforeSet,
+                scrollTopAfter: readPreviewScrollMetrics().scrollTop
+            });
         }).fail(function () {
             vditor.tip("Get file request error", 0);
         })
@@ -1234,6 +1254,55 @@
      * 统一构造并发送预览页同步消息。
      * 页面侧所有 ready、rendered、dirty、viewport 和 selection 事件都通过同一 JSON 通道回传宿主。
      */
+    /**
+     * 读取当前预览滚动容器的纵向位置和可视高度。
+     * 容器不存在时两个值都是 null，方便宿主日志区分“没读到”和“停在 0”。
+     */
+    function readPreviewScrollMetrics() {
+        const container = getPreviewScrollContainer();
+        if (!container) {
+            return {scrollTop: null, clientHeight: null};
+        }
+        return {scrollTop: container.scrollTop, clientHeight: container.clientHeight};
+    }
+
+    /**
+     * 把切 tab 滚动采样发给宿主。
+     * 宿主无条件写入 idea.log，不走 previewSyncDebug 开关。
+     */
+    function tracePreviewTab(detail) {
+        emitPreviewSyncMessage("previewTabTrace", detail || {}, "programmatic");
+    }
+
+    function traceEditFocus(detail) {
+        const payload = detail || {};
+        payload.stage = "editFocus";
+        tracePreviewTab(payload);
+    }
+
+    function traceApplyMarkdown(detail) {
+        const payload = detail || {};
+        payload.stage = "applyMarkdown";
+        tracePreviewTab(payload);
+    }
+
+    /**
+     * 切回预览后延迟一帧布局，再上报 scrollTop。
+     * 延迟用来看到 JCEF 重新显示后的最终位置，而不是切换瞬间的中间值。
+     */
+    function schedulePreviewTabVisibleSample() {
+        clearTimeout(previewSyncState.previewTabSampleTimer);
+        previewSyncState.previewTabSampleTimer = setTimeout(function () {
+            const metrics = readPreviewScrollMetrics();
+            tracePreviewTab({
+                stage: "visible-300ms",
+                scrollTop: metrics.scrollTop,
+                clientHeight: metrics.clientHeight,
+                setValue: false
+            });
+        }, 300);
+    }
+
     function emitPreviewSyncMessage(type, payload, source, contentVersion) {
         if (typeof window.previewSyncBridge !== "function") {
             return;
@@ -2207,16 +2276,28 @@
         const contentVersion = typeof message.contentVersion === "number" ? message.contentVersion : 0;
         previewSyncState.sourceMapBlocks = Array.isArray(message.payload.sourceMap) ? message.payload.sourceMap : [];
         if (previewSyncState.dirty) {
+            traceApplyMarkdown({
+                skipped: "dirty",
+                markdownLength: markdown.length,
+                setValue: false
+            });
             return;
         }
+        const currentValue = vditor && vditor.getValue ? vditor.getValue() : "";
+        const getValueEqualsHost = currentValue === markdown;
+        const lastHostEqualsHost = previewSyncState.lastHostMarkdown === markdown;
+        const scrollTopBefore = readPreviewScrollMetrics().scrollTop;
         previewSyncState.applyingMarkdown = true;
+        let didSetValue = false;
         try {
-            if (vditor.getValue() !== markdown) {
+            if (!getValueEqualsHost) {
                 vditor.setValue(markdown);
+                didSetValue = true;
             }
             fileValue = markdown;
             initError = false;
             previewSyncState.lastAppliedContentVersion = contentVersion;
+            previewSyncState.lastHostMarkdown = markdown;
             syncedTip(true, markdown);
             setPreviewDirtyState(false, "programmatic");
             window.setPreviewEditable(window.previewEditable);
@@ -2226,6 +2307,14 @@
                 previewSyncState.applyingMarkdown = false;
             }, 0);
         }
+        traceApplyMarkdown({
+            markdownLength: markdown.length,
+            getValueEqualsHost: getValueEqualsHost,
+            lastHostEqualsHost: lastHostEqualsHost,
+            setValue: didSetValue,
+            scrollTopBefore: scrollTopBefore,
+            scrollTopAfter: readPreviewScrollMetrics().scrollTop
+        });
     }
 
     /**
@@ -2404,6 +2493,9 @@
                         message.payload ? message.payload.topRatio : 0,
                         message.payload ? message.payload.reason : "programmatic"
                     );
+                    break;
+                case "samplePreviewTabScroll":
+                    schedulePreviewTabVisibleSample();
                     break;
                 default:
                     break;

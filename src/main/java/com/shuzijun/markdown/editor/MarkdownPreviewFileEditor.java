@@ -14,6 +14,7 @@ import com.intellij.openapi.actionSystem.DefaultActionGroup;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.editor.Document;
+import com.intellij.openapi.editor.Editor;
 import com.intellij.openapi.editor.colors.EditorColorsListener;
 import com.intellij.openapi.editor.colors.EditorColorsManager;
 import com.intellij.openapi.editor.colors.EditorColorsScheme;
@@ -26,6 +27,7 @@ import com.intellij.openapi.fileEditor.FileDocumentManager;
 import com.intellij.openapi.fileEditor.FileEditor;
 import com.intellij.openapi.fileEditor.FileEditorLocation;
 import com.intellij.openapi.fileEditor.FileEditorState;
+import com.intellij.openapi.fileEditor.TextEditor;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.util.UserDataHolderBase;
@@ -75,6 +77,7 @@ import java.text.DecimalFormat;
 import java.text.DecimalFormatSymbols;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -89,6 +92,8 @@ import java.util.regex.Pattern;
 public class MarkdownPreviewFileEditor extends UserDataHolderBase implements FileEditor {
 
     private static final Logger LOG = Logger.getInstance(MarkdownPreviewFileEditor.class);
+    private static final String PREVIEW_TAB_TRACE_PREFIX = "[preview-tab] ";
+    private static final int TEXT_TOP_LINE_TRACE_DELAY_MS = 200;
     private static final Pattern CODE_THEME_PATTERN = Pattern.compile("\"([^\"]+)\"");
     private static final Set<String> SUPPORTED_PREVIEW_CODE_THEMES = loadSupportedPreviewCodeThemes();
 
@@ -130,6 +135,11 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
      * Markdown 源码变更时不直接每次按键都触发整页 `setValue`，而是做轻量延迟合并，降低 JCEF 重绘压力。
      */
     private final Alarm contentSyncAlarm;
+    /**
+     * 切到 Text 后延迟读取可视区顶行。
+     * 和内容同步闹钟分开，避免互相取消未发出的正文推送。
+     */
+    private final Alarm tabTraceAlarm;
 
     /**
      * 初始化 Markdown 预览编辑器。
@@ -148,6 +158,7 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
         previewUrl = UrlEscapers.urlFragmentEscaper().escape(URLUtil.FILE_PROTOCOL + URLUtil.SCHEME_SEPARATOR + FileUtils.separator() + myFile.getPath());
         syncCoordinator = new PreviewEditorSyncCoordinator(myFile.getPath());
         contentSyncAlarm = new Alarm(this);
+        tabTraceAlarm = new Alarm(this);
         syncCoordinator.updateDocument(myDocument.getText(), myDocument.getModificationStamp());
         initToolbarPanel();
         rebuildPreviewPanel();
@@ -300,9 +311,13 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
             @Override
             public void selectionChanged(@NotNull FileEditorManagerEvent event) {
                 if (event.getNewFile() != null && !myFile.equals(event.getNewFile())) {
+                    tracePreviewTab("selection sameFile=false, old=" + editorTraceName(event.getOldEditor())
+                            + ", new=" + editorTraceName(event.getNewEditor()));
                     return;
                 }
+                traceFileEditorSelection(event);
                 if (event.getNewEditor() == MarkdownPreviewFileEditor.this) {
+                    dispatchPreviewMessages(Collections.singletonList(PreviewSyncMessage.samplePreviewTab(myFile.getPath())));
                     scheduleContentSync("activation");
                 }
             }
@@ -348,6 +363,9 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
             case PreviewSyncMessage.TYPE_PREVIEW_IMAGE_REQUEST:
                 handlePreviewImageRequest(message.getJSONObject("payload"));
                 break;
+            case PreviewSyncMessage.TYPE_PREVIEW_TAB_TRACE:
+                tracePreviewTab(formatPreviewTabTrace(message.getJSONObject("payload")));
+                break;
             default:
                 break;
         }
@@ -362,7 +380,11 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
     private void scheduleContentSync(@NotNull String reason) {
         contentSyncAlarm.cancelAllRequests();
         contentSyncAlarm.addRequest(() -> {
-            dispatchPreviewMessages(syncCoordinator.updateDocument(myDocument.getText(), myDocument.getModificationStamp()));
+            List<PreviewSyncMessage> messages = syncCoordinator.updateDocument(myDocument.getText(), myDocument.getModificationStamp());
+            tracePreviewTab("contentSync reason=" + reason
+                    + ", stamp=" + myDocument.getModificationStamp()
+                    + ", applyMarkdown=" + containsApplyMarkdown(messages));
+            dispatchPreviewMessages(messages);
         }, "activation".equals(reason) ? 0 : 120);
     }
 
@@ -487,6 +509,75 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
             return com.shuzijun.markdown.editor.sync.PreviewEditorSyncState.PreviewAnchorKind.USER_SELECTION;
         }
         return com.shuzijun.markdown.editor.sync.PreviewEditorSyncState.PreviewAnchorKind.USER_SCROLL;
+    }
+
+    /**
+     * 记录同文件底部 tab 切换，并在切到 Text 后延迟再读一次顶行。
+     * 延迟读取用来区分“切换当下的位置”和“平台随后把光标滚进可视区”。
+     *
+     * @param event 当前文件编辑器切换事件
+     */
+    private void traceFileEditorSelection(@NotNull FileEditorManagerEvent event) {
+        tracePreviewTab("selection sameFile=true, old=" + editorTraceName(event.getOldEditor())
+                + ", new=" + editorTraceName(event.getNewEditor())
+                + ", stamp=" + myDocument.getModificationStamp());
+        if (!(event.getNewEditor() instanceof TextEditor)) {
+            return;
+        }
+        Editor editor = ((TextEditor) event.getNewEditor()).getEditor();
+        if (editor.getDocument() != myDocument) {
+            tracePreviewTab("text editor document mismatch");
+            return;
+        }
+        logTextTopLine("immediate", editor);
+        tabTraceAlarm.cancelAllRequests();
+        tabTraceAlarm.addRequest(() -> logTextTopLine("after200ms", editor), TEXT_TOP_LINE_TRACE_DELAY_MS);
+    }
+
+    /**
+     * 把 Text 编辑器当前可视区顶行写入跟踪日志。
+     * 这里只读位置，不调用滚动接口。
+     *
+     * @param phase  采样时机，例如 immediate、after200ms
+     * @param editor 当前文本编辑器
+     */
+    private void logTextTopLine(@NotNull String phase, @NotNull Editor editor) {
+        if (editor.isDisposed()) {
+            tracePreviewTab("text topLine phase=" + phase + ", disposed=true");
+            return;
+        }
+        Rectangle visibleArea = editor.getScrollingModel().getVisibleArea();
+        int topLine = editor.xyToLogicalPosition(new Point(visibleArea.x, visibleArea.y)).line;
+        tracePreviewTab("text topLine phase=" + phase + ", topLine=" + topLine + ", pluginMovedEditor=false");
+    }
+
+    @NotNull
+    private static String editorTraceName(@Nullable FileEditor editor) {
+        if (editor == null) {
+            return "null";
+        }
+        return editor.getClass().getSimpleName();
+    }
+
+    private static boolean containsApplyMarkdown(@NotNull List<PreviewSyncMessage> messages) {
+        for (PreviewSyncMessage message : messages) {
+            if (PreviewSyncMessage.TYPE_APPLY_MARKDOWN.equals(message.getType())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void tracePreviewTab(@NotNull String detail) {
+        LOG.info(PREVIEW_TAB_TRACE_PREFIX + detail);
+    }
+
+    @NotNull
+    private static String formatPreviewTabTrace(@Nullable JSONObject payload) {
+        if (payload == null) {
+            return "page {}";
+        }
+        return "page " + payload.toJSONString();
     }
 
     /**

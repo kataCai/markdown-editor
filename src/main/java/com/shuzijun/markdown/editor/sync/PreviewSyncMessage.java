@@ -33,6 +33,15 @@ public class PreviewSyncMessage {
     public static final String TYPE_PREVIEW_CODE_THEME_CHANGED = "previewCodeThemeChanged";
     public static final String TYPE_APPLY_MARKDOWN = "applyMarkdown";
     public static final String TYPE_REVEAL_SOURCE_LINE = "revealSourceLine";
+    /**
+     * 页面把切 tab 时的滚动采样回传宿主。
+     * 宿主收到后写入 idea.log，不参与滚动决策。
+     */
+    public static final String TYPE_PREVIEW_TAB_TRACE = "previewTabTrace";
+    /**
+     * 宿主通知页面在切回预览后采样当前滚动位置。
+     */
+    public static final String TYPE_SAMPLE_PREVIEW_TAB = "samplePreviewTabScroll";
 
     private final String type;
     private final String filePath;
@@ -162,6 +171,24 @@ public class PreviewSyncMessage {
      * @param reason         触发原因，例如 caret、scroll、activation
      * @return 结构化消息对象
      */
+    /**
+     * 创建切回预览后的滚动采样指令。
+     * 页面收到后延迟读取 scrollTop，再通过 {@link #TYPE_PREVIEW_TAB_TRACE} 回传。
+     *
+     * @param filePath 当前文档路径
+     * @return 结构化消息对象
+     */
+    public static PreviewSyncMessage samplePreviewTab(String filePath) {
+        return new PreviewSyncMessage(
+                TYPE_SAMPLE_PREVIEW_TAB,
+                filePath,
+                0L,
+                System.currentTimeMillis(),
+                "activation",
+                new JSONObject()
+        );
+    }
+
     public static PreviewSyncMessage revealSourceLine(String filePath,
                                                       long contentVersion,
                                                       String source,

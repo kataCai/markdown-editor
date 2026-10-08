@@ -1406,12 +1406,8 @@
     function findHorizontalScrollHost(targetElement, stopElement, appliedDelta) {
         let element = targetElement;
         while (element) {
-            if (isHorizontallyScrollable(element)) {
-                const nextScrollLeft = element.scrollLeft + appliedDelta;
-                const maxScrollLeft = element.scrollWidth - element.clientWidth;
-                if (nextScrollLeft >= 0 && nextScrollLeft <= maxScrollLeft) {
-                    return element;
-                }
+            if (canConsumeHorizontalDelta(element, appliedDelta)) {
+                return element;
             }
             if (element === stopElement) {
                 break;

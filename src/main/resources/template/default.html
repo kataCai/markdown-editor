@@ -747,6 +747,7 @@
         }
         mermaidPreviewViewerState.mutationObserver = new MutationObserver(function () {
             scheduleMermaidPreviewDecoration("mutationObserver");
+            schedulePreviewTableResizeRefresh("mutationObserver");
         });
         mermaidPreviewViewerState.mutationObserver.observe(previewRootElement, {
             childList: true,
@@ -1485,6 +1486,7 @@
         setTimeout(function () {
             rebuildPreviewSyncArtifacts();
             scheduleMermaidPreviewDecoration(reason || "previewSyncArtifacts");
+            schedulePreviewTableResizeRefresh(reason || "previewSyncArtifacts");
         }, 0);
     }
 
@@ -2384,6 +2386,25 @@
             appendPreviewTableSurfaceRules(rules, surfaces[index]);
         }
         styleElement.textContent = rules.join("\n");
+    }
+
+    /**
+     * 表格节点被换掉后按原记录重放样式。拖拽中的表如果已经不在文档里，这次拖拽作废。
+     */
+    function refreshPreviewTableResize() {
+        const drag = previewTableResizeState.drag;
+        if (drag && !drag.table.isConnected) {
+            finishPreviewTableResizeDrag(false);
+        }
+        applyPreviewTableSizeStyles();
+    }
+
+    function schedulePreviewTableResizeRefresh(reason) {
+        clearTimeout(previewTableResizeState.refreshTimer);
+        previewTableResizeState.refreshTimer = setTimeout(function () {
+            previewTableResizeState.refreshTimer = 0;
+            refreshPreviewTableResize();
+        }, 0);
     }
 
     function locatePreviewTableOnSurface(surface, table) {

@@ -112,6 +112,21 @@
             height: 16px;
             fill: currentColor;
         }
+
+        /* 表格拖拽指示线挂在 #vditor 上，不进入可编辑节点。 */
+        #vditor .markdown-preview-table-resize-guide {
+            position: fixed;
+            z-index: 20;
+            display: none;
+            pointer-events: none;
+            background: rgba(120, 170, 255, .9);
+        }
+
+        /* 盖过 style.css 里的全局 cursor: default。 */
+        #vditor.markdown-preview-table-col-resize,
+        #vditor.markdown-preview-table-col-resize * {
+            cursor: col-resize;
+        }
     </style>
 </head>
 <body class="body">
@@ -2078,6 +2093,12 @@
      */
     const PREVIEW_TABLE_SIZE_STYLE_ID = "markdown-preview-table-sizes";
     const PREVIEW_TABLE_HEADER_KEY_LIMIT = 120;
+    const PREVIEW_TABLE_RESIZE_HIT_PX = 6;
+    const PREVIEW_TABLE_COLUMN_MIN_PX = 36;
+    const PREVIEW_TABLE_EDGE_SCROLL_PX = 24;
+    const PREVIEW_TABLE_EDGE_SCROLL_STEP_PX = 16;
+    const PREVIEW_TABLE_COL_RESIZE_CLASS = "markdown-preview-table-col-resize";
+    const PREVIEW_TABLE_GUIDE_CLASS = "markdown-preview-table-resize-guide";
     const previewTableResizeState = {
         sizesByKey: {},
         drag: null,
@@ -2359,6 +2380,383 @@
         styleElement.textContent = rules.join("\n");
     }
 
+    function locatePreviewTableOnSurface(surface, table) {
+        const tables = listTopLevelPreviewTables(surface);
+        for (let index = 0; index < tables.length; index += 1) {
+            if (tables[index] === table) {
+                return {key: resolvePreviewTableSizeKey(table, index), index: index, surface: surface};
+            }
+        }
+        return null;
+    }
+
+    function locatePreviewTable(table) {
+        const surfaces = collectPreviewTableSurfaces();
+        for (let index = 0; index < surfaces.length; index += 1) {
+            const found = locatePreviewTableOnSurface(surfaces[index], table);
+            if (found) {
+                return found;
+            }
+        }
+        return null;
+    }
+
+    function clonePreviewTableRowHeights(record) {
+        const source = record && record.rowHeights ? record.rowHeights : {};
+        const copy = {};
+        const keys = Object.keys(source);
+        for (let index = 0; index < keys.length; index += 1) {
+            copy[keys[index]] = source[keys[index]];
+        }
+        return copy;
+    }
+
+    function measurePreviewTableColumnWidths(table) {
+        const widths = [];
+        const row = table.rows && table.rows[0];
+        if (!row) {
+            return widths;
+        }
+        for (let index = 0; index < row.cells.length; index += 1) {
+            widths.push(Math.round(row.cells[index].getBoundingClientRect().width));
+        }
+        return widths;
+    }
+
+    function pointerInsidePreviewTableCell(rect, clientX, clientY) {
+        return clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
+    }
+
+    /**
+     * 右边框向内 6px 命中列宽。底边留给行高，竖边优先。
+     */
+    function findPreviewTableResizeHit(event) {
+        const target = event.target;
+        if (!target || !target.closest) {
+            return null;
+        }
+        const cell = target.closest("td, th");
+        if (!cell) {
+            return null;
+        }
+        const table = cell.closest("table");
+        if (!isPreviewTableResizable(table)) {
+            return null;
+        }
+        const rect = cell.getBoundingClientRect();
+        if (!pointerInsidePreviewTableCell(rect, event.clientX, event.clientY)) {
+            return null;
+        }
+        if (rect.right - event.clientX <= PREVIEW_TABLE_RESIZE_HIT_PX) {
+            return {kind: "column", cell: cell, table: table, columnIndex: cell.cellIndex};
+        }
+        return null;
+    }
+
+    function syncPreviewTableResizeCursor(kind) {
+        const root = document.getElementById("vditor");
+        if (!root) {
+            return;
+        }
+        root.classList.toggle(PREVIEW_TABLE_COL_RESIZE_CLASS, kind === "column");
+    }
+
+    function ensurePreviewTableResizeGuide() {
+        if (previewTableResizeState.guideElement) {
+            return previewTableResizeState.guideElement;
+        }
+        const root = document.getElementById("vditor");
+        if (!root) {
+            return null;
+        }
+        const guide = document.createElement("div");
+        guide.className = PREVIEW_TABLE_GUIDE_CLASS;
+        root.appendChild(guide);
+        previewTableResizeState.guideElement = guide;
+        return guide;
+    }
+
+    function hidePreviewTableResizeGuide() {
+        const guide = previewTableResizeState.guideElement;
+        if (!guide) {
+            return;
+        }
+        guide.style.display = "none";
+    }
+
+    function showPreviewTableColumnGuide(cell) {
+        const guide = ensurePreviewTableResizeGuide();
+        const table = cell.closest("table");
+        if (!guide || !table) {
+            return;
+        }
+        const cellRect = cell.getBoundingClientRect();
+        const tableRect = table.getBoundingClientRect();
+        guide.style.left = (cellRect.right - 1) + "px";
+        guide.style.top = tableRect.top + "px";
+        guide.style.width = "1px";
+        guide.style.height = Math.max(tableRect.height, 1) + "px";
+        guide.style.display = "block";
+    }
+
+    function previewTableNodeScrolls(node) {
+        const style = window.getComputedStyle(node);
+        return style.overflowX === "auto" || style.overflowX === "scroll"
+            || style.overflowY === "auto" || style.overflowY === "scroll";
+    }
+
+    function findPreviewTableScrollContainer(table) {
+        let node = table.parentElement;
+        while (node && node !== document.body) {
+            if (previewTableNodeScrolls(node)) {
+                return node;
+            }
+            node = node.parentElement;
+        }
+        return getPreviewScrollContainer();
+    }
+
+    function previewTableRecordHasRowHeights(record) {
+        return !!(record && record.rowHeights && Object.keys(record.rowHeights).length);
+    }
+
+    function clearPreviewTableColumnWidths(table) {
+        const located = locatePreviewTable(table);
+        if (!located) {
+            return;
+        }
+        const record = previewTableResizeState.sizesByKey[located.key];
+        if (!record) {
+            return;
+        }
+        record.columnWidths = null;
+        if (!previewTableRecordHasRowHeights(record)) {
+            delete previewTableResizeState.sizesByKey[located.key];
+        }
+        applyPreviewTableSizeStyles();
+    }
+
+    function startPreviewTableColumnDrag(hit, event) {
+        const located = locatePreviewTable(hit.table);
+        if (!located) {
+            return;
+        }
+        const existing = previewTableResizeState.sizesByKey[located.key];
+        const widths = existing && existing.columnWidths
+            ? existing.columnWidths.slice()
+            : measurePreviewTableColumnWidths(hit.table);
+        if (!widths.length || hit.columnIndex >= widths.length) {
+            return;
+        }
+        previewTableResizeState.drag = {
+            kind: "column",
+            table: hit.table,
+            key: located.key,
+            columnIndex: hit.columnIndex,
+            originClient: event.clientX,
+            originWidth: widths[hit.columnIndex],
+            columnWidths: widths,
+            rowHeights: clonePreviewTableRowHeights(existing),
+            scrollContainer: findPreviewTableScrollContainer(hit.table),
+            clientX: event.clientX,
+            clientY: event.clientY,
+            scrollOffset: 0,
+            moved: false,
+            previewRecord: null
+        };
+        syncPreviewTableResizeCursor("column");
+        showPreviewTableColumnGuide(hit.cell);
+        document.addEventListener("mousemove", onPreviewTableResizeDragMove, true);
+        document.addEventListener("mouseup", onPreviewTableResizeMouseUp, true);
+        startPreviewTableEdgeScroll();
+    }
+
+    function updatePreviewTableColumnDrag() {
+        const drag = previewTableResizeState.drag;
+        const width = Math.max(
+            PREVIEW_TABLE_COLUMN_MIN_PX,
+            Math.round(drag.originWidth + (drag.clientX - drag.originClient) + drag.scrollOffset)
+        );
+        drag.columnWidths[drag.columnIndex] = width;
+        drag.previewRecord = {
+            columnWidths: drag.columnWidths.slice(),
+            rowHeights: drag.rowHeights
+        };
+        applyPreviewTableSizeStyles();
+        const row = drag.table.rows && drag.table.rows[0];
+        const cell = row && row.cells[drag.columnIndex];
+        if (cell) {
+            showPreviewTableColumnGuide(cell);
+        }
+    }
+
+    function finishPreviewTableResizeDrag(commit) {
+        const drag = previewTableResizeState.drag;
+        stopPreviewTableEdgeScroll();
+        document.removeEventListener("mousemove", onPreviewTableResizeDragMove, true);
+        document.removeEventListener("mouseup", onPreviewTableResizeMouseUp, true);
+        if (commit && drag && drag.moved && drag.table.isConnected && drag.previewRecord) {
+            previewTableResizeState.sizesByKey[drag.key] = {
+                columnWidths: drag.previewRecord.columnWidths,
+                rowHeights: drag.previewRecord.rowHeights
+            };
+        }
+        previewTableResizeState.drag = null;
+        syncPreviewTableResizeCursor("");
+        hidePreviewTableResizeGuide();
+        applyPreviewTableSizeStyles();
+    }
+
+    function onPreviewTableResizeHoverMove(event) {
+        if (previewTableResizeState.drag) {
+            return;
+        }
+        const hit = findPreviewTableResizeHit(event);
+        if (!hit) {
+            syncPreviewTableResizeCursor("");
+            hidePreviewTableResizeGuide();
+            return;
+        }
+        syncPreviewTableResizeCursor(hit.kind);
+        showPreviewTableColumnGuide(hit.cell);
+    }
+
+    function onPreviewTableResizeMouseDown(event) {
+        if (event.button !== 0 || previewTableResizeState.drag) {
+            return;
+        }
+        const hit = findPreviewTableResizeHit(event);
+        if (!hit || hit.kind !== "column") {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        startPreviewTableColumnDrag(hit, event);
+    }
+
+    function onPreviewTableResizeDragMove(event) {
+        const drag = previewTableResizeState.drag;
+        if (!drag) {
+            return;
+        }
+        event.preventDefault();
+        drag.clientX = event.clientX;
+        drag.clientY = event.clientY;
+        if (drag.clientX !== drag.originClient || drag.scrollOffset !== 0) {
+            drag.moved = true;
+        }
+        if (!drag.table.isConnected) {
+            finishPreviewTableResizeDrag(false);
+            return;
+        }
+        updatePreviewTableColumnDrag();
+    }
+
+    function onPreviewTableResizeMouseUp(event) {
+        const drag = previewTableResizeState.drag;
+        if (!drag) {
+            return;
+        }
+        event.preventDefault();
+        finishPreviewTableResizeDrag(drag.moved && drag.table.isConnected);
+    }
+
+    function onPreviewTableResizeDoubleClick(event) {
+        const hit = findPreviewTableResizeHit(event);
+        if (!hit || hit.kind !== "column") {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        clearPreviewTableColumnWidths(hit.table);
+    }
+
+    function startPreviewTableEdgeScroll() {
+        if (previewTableResizeState.edgeScrollFrame) {
+            return;
+        }
+        previewTableResizeState.edgeScrollFrame = window.requestAnimationFrame(runPreviewTableEdgeScrollFrame);
+    }
+
+    function stopPreviewTableEdgeScroll() {
+        if (!previewTableResizeState.edgeScrollFrame) {
+            return;
+        }
+        window.cancelAnimationFrame(previewTableResizeState.edgeScrollFrame);
+        previewTableResizeState.edgeScrollFrame = 0;
+    }
+
+    function runPreviewTableEdgeScrollFrame() {
+        previewTableResizeState.edgeScrollFrame = 0;
+        if (!previewTableResizeState.drag) {
+            return;
+        }
+        applyPreviewTableEdgeScroll();
+        if (!previewTableResizeState.drag) {
+            return;
+        }
+        previewTableResizeState.edgeScrollFrame = window.requestAnimationFrame(runPreviewTableEdgeScrollFrame);
+    }
+
+    function resolvePreviewTableEdgeDelta(drag) {
+        const container = drag.scrollContainer;
+        if (!container || drag.kind !== "column") {
+            return 0;
+        }
+        const rect = container.getBoundingClientRect();
+        if (drag.clientX < rect.left + PREVIEW_TABLE_EDGE_SCROLL_PX) {
+            return -PREVIEW_TABLE_EDGE_SCROLL_STEP_PX;
+        }
+        if (drag.clientX > rect.right - PREVIEW_TABLE_EDGE_SCROLL_PX) {
+            return PREVIEW_TABLE_EDGE_SCROLL_STEP_PX;
+        }
+        return 0;
+    }
+
+    function scrollPreviewTableContainer(container, delta) {
+        if (!container || !delta) {
+            return 0;
+        }
+        const maxScroll = container.scrollWidth - container.clientWidth;
+        const before = container.scrollLeft;
+        if (delta > 0 && before >= maxScroll - 0.5) {
+            return 0;
+        }
+        if (delta < 0 && before <= 0) {
+            return 0;
+        }
+        container.scrollLeft = before + delta;
+        return container.scrollLeft - before;
+    }
+
+    function applyPreviewTableEdgeScroll() {
+        const drag = previewTableResizeState.drag;
+        if (!drag) {
+            return;
+        }
+        const consumed = scrollPreviewTableContainer(drag.scrollContainer, resolvePreviewTableEdgeDelta(drag));
+        if (!consumed) {
+            return;
+        }
+        drag.scrollOffset += consumed;
+        drag.moved = true;
+        if (!drag.table.isConnected) {
+            finishPreviewTableResizeDrag(false);
+            return;
+        }
+        updatePreviewTableColumnDrag();
+    }
+
+    function bindPreviewTableResize() {
+        if (previewTableResizeState.bound) {
+            return;
+        }
+        previewTableResizeState.bound = true;
+        document.addEventListener("mousemove", onPreviewTableResizeHoverMove, true);
+        document.addEventListener("mousedown", onPreviewTableResizeMouseDown, true);
+        document.addEventListener("dblclick", onPreviewTableResizeDoubleClick, true);
+    }
+
     function exportFile(type) {
         let options = {
             mode: "light",
@@ -2519,6 +2917,7 @@
             fileValue = vditor.getValue()
             bindReadonlyInteractionGuards();
             bindPreviewHorizontalWheelNormalization();
+            bindPreviewTableResize();
             bindPreviewSyncListeners();
             initToolbarExtensions();
             ensureMermaidPreviewMutationObserver();

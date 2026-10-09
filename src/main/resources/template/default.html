@@ -2344,7 +2344,7 @@
                 continue;
             }
             const heightText = height + "px";
-            rules.push(rowSelector + " > th, " + rowSelector + " > td { height: " + heightText + "; min-height: " + heightText + "; }");
+            rules.push(rowSelector + " > th, " + rowSelector + " > td { box-sizing: border-box; height: " + heightText + "; min-height: " + heightText + "; }");
         }
     }
 
@@ -2494,8 +2494,9 @@
     }
 
     function ensurePreviewTableResizeGuide() {
-        if (previewTableResizeState.guideElement) {
-            return previewTableResizeState.guideElement;
+        const existing = previewTableResizeState.guideElement;
+        if (existing && existing.isConnected) {
+            return existing;
         }
         const root = document.getElementById("vditor");
         if (!root) {

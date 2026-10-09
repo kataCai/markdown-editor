@@ -73,6 +73,12 @@ public class MermaidUpgradeResourceVerificationTest {
     private static final Path DEFAULT_HTML_PATH = Path.of("src/main/resources/template/default.html");
 
     /**
+     * 整屏 Mermaid 查看页模板。
+     * 放大、拖拽和关闭已经从预览页挪到这份独立页面。
+     */
+    private static final Path MERMAID_PREVIEW_VIEWER_PATH = Path.of("src/main/resources/template/mermaid-preview-viewer.html");
+
+    /**
      * Vditor 类型声明路径。
      * 这里用它来静态校验 `default.html` 中使用的配置键仍在 3.11.2 暴露的公开接口内。
      */
@@ -165,62 +171,59 @@ public class MermaidUpgradeResourceVerificationTest {
     }
 
     /**
-     * 验证 `default.html` 已经预留 Mermaid 放大查看能力所需的关键页面钩子。
-     * 该测试不尝试在 JCEF 中模拟真实点击和缩放，而是先把这次功能依赖的静态结构固化下来，
-     * 重点覆盖三类后续高风险回归：
-     * 1. Mermaid 渲染块重扫入口被误删，导致异步渲染后的图表不再补出放大按钮；
-     * 2. 悬浮查看层的打开、关闭和缩放函数名被整理掉，导致宿主无法继续沿用同一套页面自管能力；
-     * 3. 事件隔离根节点丢失，导致查看层滚轮和点击重新污染现有的预览联动状态。
+     * 验证预览页仍负责 Mermaid 按钮和重扫，并把放大请求发给宿主。
+     * 查看层本身不再挂在预览页里，避免放大结果继续被当前标签页视口裁住。
      *
      * @throws IOException 当模板资源读取失败时抛出，用于直接暴露预览页模板缺失的问题
      */
     @Test
     public void shouldKeepDefaultHtmlWiredForMermaidPreviewViewerHooks() throws IOException {
         String defaultHtml = readProjectFile(DEFAULT_HTML_PATH);
+        String viewerHtml = readProjectFile(MERMAID_PREVIEW_VIEWER_PATH);
 
         Assert.assertTrue("default.html 应继续保留 Mermaid 渲染块装饰入口",
                 defaultHtml.contains("function decorateMermaidPreviewBlocks()"));
-        Assert.assertTrue("default.html 应继续保留 Mermaid 放大查看层打开入口",
+        Assert.assertTrue("default.html 应继续保留 Mermaid 放大请求入口",
                 defaultHtml.contains("function openMermaidPreviewViewer("));
-        Assert.assertTrue("default.html 应继续保留 Mermaid 放大查看层关闭入口",
-                defaultHtml.contains("function closeMermaidPreviewViewer()"));
-        Assert.assertTrue("default.html 应继续保留 Mermaid 放大查看层缩放入口",
-                defaultHtml.contains("function updateMermaidPreviewScale("));
-        Assert.assertTrue("default.html 应继续保留 Mermaid 查看层事件隔离判断",
-                defaultHtml.contains("function isMermaidPreviewViewerEventTarget("));
         Assert.assertTrue("default.html 应继续保留 Mermaid 渲染结果异步重扫所需的 MutationObserver",
                 defaultHtml.contains("new MutationObserver("));
-        Assert.assertTrue("default.html 应继续保留查看层根节点 class，便于统一样式和事件隔离",
-                defaultHtml.contains("markdown-preview-figure-viewer"));
+        Assert.assertTrue("default.html 应把放大请求发给宿主",
+                defaultHtml.contains("previewMermaidRequest"));
+        Assert.assertTrue("default.html 应序列化当前 SVG，而不是在预览页挂载查看层",
+                defaultHtml.contains("function serializeMermaidPreviewSvg(")
+                        && !defaultHtml.contains("markdown-preview-figure-viewer"));
+        Assert.assertTrue("独立查看页应保留关闭、缩放和事件判断入口",
+                viewerHtml.contains("function closeMermaidPreviewViewer()")
+                        && viewerHtml.contains("function updateMermaidPreviewScale(")
+                        && viewerHtml.contains("function isMermaidPreviewViewerEventTarget("));
     }
 
     /**
-     * 验证 `default.html` 针对 Mermaid 查看层的交互增强仍然保留关键静态结构。
-     * 这条测试聚焦本次优化最容易被后续样式整理或事件重构误伤的三类实现约束：
-     * 1. 查看层 viewport 仍然保留独立拖拽绑定入口，避免放大后只能依赖滚动条浏览大图；
-     * 2. 查看层仍然保留抓手态光标和拖拽中光标，确保交互反馈不会在主题或样式整理时丢失；
-     * 3. toolbar 仍然保留紧凑分组容器，避免四个按钮重新退化为松散的普通 flex 文本按钮。
-     * 由于当前仓库没有浏览器级 UI 自动化，这里先用静态资源断言把关键钩子固化下来，
-     * 一旦后续重构误删拖拽入口或 toolbar 结构，至少能在单测阶段尽早暴露。
+     * 验证独立查看页仍然保留拖拽、抓手光标和紧凑工具条。
+     * 这些结构已经离开预览页，后续样式整理如果只改 default.html，这条测试仍能发现查看页被改丢。
      *
-     * @throws IOException 当模板资源读取失败时抛出，用于直接暴露预览页模板缺失的问题
+     * @throws IOException 当查看页模板读取失败时抛出
      */
     @Test
     public void shouldKeepDefaultHtmlWiredForMermaidPreviewViewerDragAndToolbarLayout() throws IOException {
-        String defaultHtml = readProjectFile(DEFAULT_HTML_PATH);
+        String viewerHtml = readProjectFile(MERMAID_PREVIEW_VIEWER_PATH);
 
-        Assert.assertTrue("default.html 应继续保留 Mermaid 查看层拖拽绑定入口",
-                defaultHtml.contains("function bindMermaidPreviewDrag("));
-        Assert.assertTrue("default.html 应继续保留 Mermaid 查看层拖拽状态清理入口",
-                defaultHtml.contains("function finishMermaidPreviewDrag("));
-        Assert.assertTrue("default.html 应继续保留 Mermaid 查看层默认抓手光标",
-                defaultHtml.contains("cursor: grab;"));
-        Assert.assertTrue("default.html 应继续保留 Mermaid 查看层拖拽中抓取光标",
-                defaultHtml.contains("cursor: grabbing;"));
-        Assert.assertTrue("default.html 应继续保留 Mermaid 查看层工具条分组容器 class",
-                defaultHtml.contains("markdown-preview-figure-viewer__toolbar-group"));
-        Assert.assertTrue("default.html 应继续在查看层打开时绑定拖拽能力",
-                defaultHtml.contains("bindMermaidPreviewDrag(viewportElement);"));
+        Assert.assertTrue("查看页应继续保留 Mermaid 查看层拖拽绑定入口",
+                viewerHtml.contains("function bindMermaidPreviewDrag("));
+        Assert.assertTrue("查看页应继续保留 Mermaid 查看层拖拽状态清理入口",
+                viewerHtml.contains("function finishMermaidPreviewDrag("));
+        Assert.assertTrue("查看页应继续保留 Mermaid 查看层默认抓手光标",
+                viewerHtml.contains("cursor: grab;"));
+        Assert.assertTrue("查看页应继续保留 Mermaid 查看层拖拽中抓取光标",
+                viewerHtml.contains("cursor: grabbing;"));
+        Assert.assertTrue("查看页应继续保留 Mermaid 查看层工具条分组容器 class",
+                viewerHtml.contains("markdown-preview-figure-viewer__toolbar-group"));
+        Assert.assertTrue("查看页应继续在查看层打开时绑定拖拽能力",
+                viewerHtml.contains("bindMermaidPreviewDrag(viewportElement);"));
+        Assert.assertTrue("查看页应用 HTML 片段插入 SVG，并保留标签换行规则",
+                viewerHtml.contains("content.innerHTML = markup || \"\";")
+                        && viewerHtml.contains("foreignObject div")
+                        && viewerHtml.contains("white-space: pre-line !important;"));
     }
 
     /**
@@ -232,7 +235,7 @@ public class MermaidUpgradeResourceVerificationTest {
      */
     @Test
     public void shouldKeepMermaidViewerToolbarUsingCompactInlineSvgIcons() throws IOException {
-        String defaultHtml = readProjectFile(DEFAULT_HTML_PATH);
+        String defaultHtml = readProjectFile(MERMAID_PREVIEW_VIEWER_PATH);
         String escapedZoomInIconMarker = "data-mermaid-viewer-icon=\\\"zoom-in\\\"";
         String escapedZoomOutIconMarker = "data-mermaid-viewer-icon=\\\"zoom-out\\\"";
         String escapedResetIconMarker = "data-mermaid-viewer-icon=\\\"reset\\\"";
@@ -315,7 +318,7 @@ public class MermaidUpgradeResourceVerificationTest {
         Assert.assertTrue("导出脚本应在渲染前做同样的反斜杠 n 替换",
                 methodMinJs.contains(MERMAID_BACKSLASH_N_REPLACE));
         Assert.assertTrue("放大查看仍应克隆当前 SVG，而不是另画一套图",
-                defaultHtml.contains("sourceSvgElement.cloneNode(true)"));
+                defaultHtml.contains("svgElement.cloneNode(true)"));
     }
 
     /**

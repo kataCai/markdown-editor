@@ -92,4 +92,25 @@ public class PreviewSyncMessageTest {
         Assert.assertEquals("demo alt", message.getPayload().getString("alt"));
         Assert.assertEquals("demo title", message.getPayload().getString("title"));
     }
+
+    /**
+     * 验证 Mermaid 整屏查看请求会带上 SVG 片段和基础尺寸。
+     * 宿主窗口只消费这三个字段，字段名变化会导致查看页打不开当前图。
+     */
+    @Test
+    public void shouldCreatePreviewMermaidRequestWithStructuredPayload() {
+        PreviewSyncMessage message = PreviewSyncMessage.previewMermaidRequest(
+                "E:/source_code/mermaid.md",
+                21L,
+                "programmatic",
+                "<svg id=\"demo\"></svg>",
+                640,
+                480
+        );
+
+        Assert.assertEquals(PreviewSyncMessage.TYPE_PREVIEW_MERMAID_REQUEST, message.getType());
+        Assert.assertEquals("<svg id=\"demo\"></svg>", message.getPayload().getString("svgMarkup"));
+        Assert.assertEquals(640, message.getPayload().getIntValue("baseWidth"));
+        Assert.assertEquals(480, message.getPayload().getIntValue("baseHeight"));
+    }
 }

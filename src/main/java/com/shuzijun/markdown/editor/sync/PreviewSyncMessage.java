@@ -27,6 +27,11 @@ public class PreviewSyncMessage {
      */
     public static final String TYPE_PREVIEW_IMAGE_REQUEST = "previewImageRequest";
     /**
+     * 预览页请求宿主打开整屏 Mermaid 查看窗口的消息类型。
+     * 页面侧只回传已经渲染好的 SVG，宿主负责创建独立窗口。
+     */
+    public static final String TYPE_PREVIEW_MERMAID_REQUEST = "previewMermaidRequest";
+    /**
      * 预览页回传的代码块高亮主题切换消息。
      * 宿主接收到该消息后会把最终生效的主题写回持久化配置，保证下次重新打开时沿用同一主题。
      */
@@ -135,6 +140,38 @@ public class PreviewSyncMessage {
         payload.put("title", title);
         return new PreviewSyncMessage(
                 TYPE_PREVIEW_IMAGE_REQUEST,
+                filePath,
+                contentVersion,
+                System.currentTimeMillis(),
+                source,
+                payload
+        );
+    }
+
+    /**
+     * 创建 Mermaid 整屏查看请求。
+     * 页面把当前 SVG 的 HTML 片段和基础尺寸交给宿主，宿主再打开独立窗口。
+     *
+     * @param filePath       当前文档路径
+     * @param contentVersion 当前内容版本
+     * @param source         来源标记
+     * @param svgMarkup      已渲染 SVG 的 HTML 片段
+     * @param baseWidth      SVG 基础宽度
+     * @param baseHeight     SVG 基础高度
+     * @return 结构化消息对象
+     */
+    public static PreviewSyncMessage previewMermaidRequest(String filePath,
+                                                           long contentVersion,
+                                                           String source,
+                                                           String svgMarkup,
+                                                           int baseWidth,
+                                                           int baseHeight) {
+        JSONObject payload = new JSONObject();
+        payload.put("svgMarkup", svgMarkup);
+        payload.put("baseWidth", baseWidth);
+        payload.put("baseHeight", baseHeight);
+        return new PreviewSyncMessage(
+                TYPE_PREVIEW_MERMAID_REQUEST,
                 filePath,
                 contentVersion,
                 System.currentTimeMillis(),

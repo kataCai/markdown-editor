@@ -52,6 +52,7 @@ import com.shuzijun.markdown.editor.sync.PreviewEditorSyncCoordinator;
 import com.shuzijun.markdown.editor.sync.PreviewSyncMessage;
 import com.shuzijun.markdown.model.PluginConstant;
 import com.shuzijun.markdown.ui.ImagePreviewDialogWrapper;
+import com.shuzijun.markdown.ui.MermaidPreviewWindow;
 import com.shuzijun.markdown.util.FileUtils;
 import com.shuzijun.markdown.util.PropertiesUtils;
 import org.apache.commons.lang3.StringUtils;
@@ -368,6 +369,9 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
             case PreviewSyncMessage.TYPE_PREVIEW_IMAGE_REQUEST:
                 handlePreviewImageRequest(message.getJSONObject("payload"));
                 break;
+            case PreviewSyncMessage.TYPE_PREVIEW_MERMAID_REQUEST:
+                handlePreviewMermaidRequest(message.getJSONObject("payload"));
+                break;
             case PreviewSyncMessage.TYPE_PREVIEW_TAB_TRACE:
                 tracePreviewTab(formatPreviewTabTrace(message.getJSONObject("payload")));
                 break;
@@ -499,6 +503,24 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
                     new Rectangle(dialogWrapper.getInitialLocation(), dialogWrapper.getInitialSize()));
             dialogWrapper.show();
         });
+    }
+
+    /**
+     * 处理预览页发起的 Mermaid 整屏查看请求。
+     * 页面侧上报已经渲染好的 SVG，宿主打开独立窗口，避免继续受当前标签页视口限制。
+     *
+     * @param payload 预览页回传的 Mermaid 查看负载
+     */
+    private void handlePreviewMermaidRequest(@Nullable JSONObject payload) {
+        if (payload == null) {
+            return;
+        }
+        MermaidPreviewWindow.open(
+                myProject,
+                payload.getString("svgMarkup"),
+                payload.getIntValue("baseWidth"),
+                payload.getIntValue("baseHeight")
+        );
     }
 
     /**

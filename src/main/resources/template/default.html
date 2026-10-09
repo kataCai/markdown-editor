@@ -2072,6 +2072,293 @@
         }
     }
 
+    /**
+     * 预览表格尺寸只活在当前页面。
+     * 列宽和行高写入 head 里的样式，不改表格节点，避免 getValue 把布局交回 Lute。
+     */
+    const PREVIEW_TABLE_SIZE_STYLE_ID = "markdown-preview-table-sizes";
+    const PREVIEW_TABLE_HEADER_KEY_LIMIT = 120;
+    const previewTableResizeState = {
+        sizesByKey: {},
+        drag: null,
+        guideElement: null,
+        bound: false,
+        refreshTimer: 0,
+        edgeScrollFrame: 0
+    };
+
+    /**
+     * 取某张表的尺寸记录。拖拽过程中优先用尚未提交的草稿，避免松手前写入半截宽度。
+     */
+    function readPreviewTableSizeRecord(key) {
+        const drag = previewTableResizeState.drag;
+        if (drag && drag.key === key && drag.previewRecord) {
+            return drag.previewRecord;
+        }
+        return previewTableResizeState.sizesByKey[key] || null;
+    }
+
+    /**
+     * 保证尺寸样式节点在 head 末尾，从而压过 Vditor 和 style.css 的表格规则。
+     */
+    function ensurePreviewTableSizeStyleElement() {
+        const existing = document.getElementById(PREVIEW_TABLE_SIZE_STYLE_ID);
+        if (existing) {
+            return existing;
+        }
+        if (!document.head) {
+            return null;
+        }
+        const styleElement = document.createElement("style");
+        styleElement.id = PREVIEW_TABLE_SIZE_STYLE_ID;
+        document.head.appendChild(styleElement);
+        return styleElement;
+    }
+
+    function collectPreviewTableSurfaces() {
+        const root = document.getElementById("vditor");
+        const surfaces = [];
+        if (!root) {
+            return surfaces;
+        }
+        pushPreviewTableSurface(surfaces, root.querySelector(".vditor-ir pre.vditor-reset"));
+        pushPreviewTableSurface(surfaces, root.querySelector(".vditor-wysiwyg pre.vditor-reset"));
+        pushPreviewTableSurface(surfaces, root.querySelector(".vditor-preview .vditor-reset"));
+        return surfaces;
+    }
+
+    function pushPreviewTableSurface(surfaces, surface) {
+        if (surface) {
+            surfaces.push(surface);
+        }
+    }
+
+    function isNestedPreviewTable(table) {
+        return !!(table.parentElement && table.parentElement.closest("table"));
+    }
+
+    function previewTableCellIsMerged(cell) {
+        const colspan = parseInt(cell.getAttribute("colspan") || "1", 10);
+        const rowspan = parseInt(cell.getAttribute("rowspan") || "1", 10);
+        return colspan > 1 || rowspan > 1;
+    }
+
+    function previewTableHasMergedCell(table) {
+        const cells = table.querySelectorAll("td, th");
+        for (let index = 0; index < cells.length; index += 1) {
+            if (previewTableCellIsMerged(cells[index])) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 源码区、内层表、合并单元格表不参与尺寸重放。
+     */
+    function isPreviewTableResizable(table) {
+        if (!table || table.tagName !== "TABLE") {
+            return false;
+        }
+        if (table.closest(".vditor-sv")) {
+            return false;
+        }
+        if (isNestedPreviewTable(table)) {
+            return false;
+        }
+        return !previewTableHasMergedCell(table);
+    }
+
+    function listTopLevelPreviewTables(surface) {
+        const tables = surface.querySelectorAll("table");
+        const result = [];
+        for (let index = 0; index < tables.length; index += 1) {
+            const table = tables[index];
+            if (isNestedPreviewTable(table) || table.closest(".vditor-sv")) {
+                continue;
+            }
+            result.push(table);
+        }
+        return result;
+    }
+
+    function resolvePreviewTableColumnCount(table) {
+        const row = table.rows && table.rows[0];
+        return row ? row.cells.length : 0;
+    }
+
+    function resolvePreviewTableHeaderText(table) {
+        const row = table.rows && table.rows[0];
+        if (!row) {
+            return "";
+        }
+        const parts = [];
+        for (let index = 0; index < row.cells.length; index += 1) {
+            parts.push((row.cells[index].textContent || "").replace(/\s+/g, " ").trim());
+        }
+        const joined = parts.join(" ");
+        if (joined.length <= PREVIEW_TABLE_HEADER_KEY_LIMIT) {
+            return joined;
+        }
+        return joined.slice(0, PREVIEW_TABLE_HEADER_KEY_LIMIT);
+    }
+
+    /**
+     * 同一文件、同一区域序号、同一列数和首行文本共用一条尺寸记录。
+     */
+    function resolvePreviewTableSizeKey(table, index) {
+        const filePath = previewSyncState.currentFilePath || currentFilePath || "";
+        const columnCount = resolvePreviewTableColumnCount(table);
+        const headerText = resolvePreviewTableHeaderText(table);
+        return filePath + "\n" + index + "\n" + columnCount + "\n" + headerText;
+    }
+
+    function resolveElementChildIndex(parent, node) {
+        let index = 1;
+        let sibling = parent.firstElementChild;
+        while (sibling) {
+            if (sibling === node) {
+                return index;
+            }
+            index += 1;
+            sibling = sibling.nextElementSibling;
+        }
+        return 0;
+    }
+
+    function resolvePreviewTableSurfaceSelector(surface) {
+        if (!surface) {
+            return "";
+        }
+        if (surface.closest(".vditor-preview")) {
+            return "#vditor .vditor-preview .vditor-reset";
+        }
+        if (surface.closest(".vditor-wysiwyg")) {
+            return "#vditor .vditor-wysiwyg pre.vditor-reset";
+        }
+        if (surface.closest(".vditor-ir")) {
+            return "#vditor .vditor-ir pre.vditor-reset";
+        }
+        return "";
+    }
+
+    function buildPreviewTableChildPath(table, surface) {
+        const parts = [];
+        let node = table;
+        while (node && node !== surface) {
+            const parent = node.parentElement;
+            if (!parent) {
+                return "";
+            }
+            const index = resolveElementChildIndex(parent, node);
+            if (!index) {
+                return "";
+            }
+            parts.unshift(node.tagName.toLowerCase() + ":nth-child(" + index + ")");
+            node = parent;
+        }
+        if (node !== surface) {
+            return "";
+        }
+        return parts.join(" > ");
+    }
+
+    /**
+     * 从滚动容器走到这张表的结构选择器。不给表格节点加 class 或 style。
+     */
+    function buildPreviewTableStructuralSelector(table, surface) {
+        const surfaceSelector = resolvePreviewTableSurfaceSelector(surface);
+        const childPath = buildPreviewTableChildPath(table, surface);
+        if (!surfaceSelector || !childPath) {
+            return "";
+        }
+        return surfaceSelector + " > " + childPath;
+    }
+
+    function buildPreviewTableRowSelector(tableSelector, rowElement) {
+        const parent = rowElement.parentElement;
+        if (!parent) {
+            return "";
+        }
+        const index = resolveElementChildIndex(parent, rowElement);
+        if (!index) {
+            return "";
+        }
+        return tableSelector + " > " + parent.tagName.toLowerCase() + " > tr:nth-child(" + index + ")";
+    }
+
+    function appendPreviewTableColumnCss(rules, selector, widths) {
+        let sum = 0;
+        for (let index = 0; index < widths.length; index += 1) {
+            sum += widths[index];
+        }
+        rules.push(selector + " { table-layout: fixed; width: " + sum + "px; }");
+        for (let index = 0; index < widths.length; index += 1) {
+            const width = widths[index] + "px";
+            const nth = index + 1;
+            const cells = selector + " tr > th:nth-child(" + nth + "), " + selector + " tr > td:nth-child(" + nth + ")";
+            rules.push(cells + " { width: " + width + "; min-width: " + width + "; max-width: " + width
+                + "; box-sizing: border-box; white-space: normal; overflow-wrap: anywhere; }");
+        }
+    }
+
+    function appendPreviewTableRowCss(rules, selector, table, rowHeights) {
+        const keys = Object.keys(rowHeights);
+        for (let index = 0; index < keys.length; index += 1) {
+            const rowIndex = parseInt(keys[index], 10);
+            const height = rowHeights[keys[index]];
+            if (!table.rows || !table.rows[rowIndex] || typeof height !== "number") {
+                continue;
+            }
+            const rowSelector = buildPreviewTableRowSelector(selector, table.rows[rowIndex]);
+            if (!rowSelector) {
+                continue;
+            }
+            const heightText = height + "px";
+            rules.push(rowSelector + " > th, " + rowSelector + " > td { height: " + heightText + "; min-height: " + heightText + "; }");
+        }
+    }
+
+    function appendPreviewTableRules(rules, surface, table, index) {
+        if (!isPreviewTableResizable(table)) {
+            return;
+        }
+        const selector = buildPreviewTableStructuralSelector(table, surface);
+        const record = readPreviewTableSizeRecord(resolvePreviewTableSizeKey(table, index));
+        if (!selector || !record) {
+            return;
+        }
+        if (record.columnWidths && record.columnWidths.length) {
+            appendPreviewTableColumnCss(rules, selector, record.columnWidths);
+        }
+        if (record.rowHeights) {
+            appendPreviewTableRowCss(rules, selector, table, record.rowHeights);
+        }
+    }
+
+    function appendPreviewTableSurfaceRules(rules, surface) {
+        const tables = listTopLevelPreviewTables(surface);
+        for (let index = 0; index < tables.length; index += 1) {
+            appendPreviewTableRules(rules, surface, tables[index], index);
+        }
+    }
+
+    /**
+     * 按内存记录重写 head 中的尺寸样式。未拖过的表不生成规则。
+     */
+    function applyPreviewTableSizeStyles() {
+        const styleElement = ensurePreviewTableSizeStyleElement();
+        if (!styleElement) {
+            return;
+        }
+        const rules = [];
+        const surfaces = collectPreviewTableSurfaces();
+        for (let index = 0; index < surfaces.length; index += 1) {
+            appendPreviewTableSurfaceRules(rules, surfaces[index]);
+        }
+        styleElement.textContent = rules.join("\n");
+    }
+
     function exportFile(type) {
         let options = {
             mode: "light",

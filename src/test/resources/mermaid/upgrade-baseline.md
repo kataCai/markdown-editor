@@ -82,3 +82,61 @@ flowchart LR
     H --> I[Isolate viewer wheel, click and selection events from preview sync listeners]
     I --> J[Keep HTML export and PDF export output free of viewer-only DOM fragments]
 ```
+
+## Label Wrap State Diagram
+
+状态图转移标签里的 `\n` 必须拆成完整的两行，不能在标签框右缘被裁掉。
+
+```mermaid
+stateDiagram-v2
+    [*] --> Lobby: 大厅 1001
+    Lobby --> Middle: 点击搜索区\n(A 组)
+    Lobby --> Lobby: 点外侧更多图标\n现有 RefreshPopupMenu
+    Middle --> Sug: 输入有效字符
+    Sug --> Middle: 清空全部输入
+    Middle --> Result: 点 Search / IME /\n历史词 / 空输入用当前暗词
+    Sug --> Result: 点 Search / IME / 联想词
+    Result --> Sug: 改搜索词（未提交）
+    Sug --> Result: 再提交，刷新结果
+    Middle --> Lobby: Back / 导航返回
+    Sug --> Lobby: Back（跳过中间页）
+    Result --> Lobby: Back（跳过中间页）
+    Middle --> GamePlay: 推荐卡点击 H5
+    Sug --> GamePlay: 点击游戏或 Play
+    Result --> GamePlay: 点击游戏或 Play
+    GamePlay --> [*]: 详情/游玩页
+```
+
+## Label Wrap Module Flowchart
+
+多行节点和无空格边标签必须完整可见，对应搜索方案模块图里被裁切的标签。
+
+```mermaid
+flowchart TB
+    subgraph host [游戏中心 APK]
+      GCLobby["GamesLobbyFragment\nfragment_gc_games_lobby.xml"]
+      GCSearch["biz_search.SearchActivity\n本期不改"]
+      Galileo["GalileoExperimentManager"]
+    end
+
+    subgraph sdk [GameLobbySdk]
+      API["gameslobby-api\nISearchPageService\nSearchLaunchParams"]
+      Lobby["gameslobby-lobby\nGamesLobbyMainView 换搜索栏"]
+      SearchMod["gameslobby-search 新模块\nMiniGameSearchActivity"]
+      Common["gameslobby-common\nLoadingPageStateLayout\nGamesLobbyTrack\nH5AppDto"]
+      Found["gameslobby-foundation\nLazyRxHttp NetHost\nJumpSdkStorageManager"]
+      Detail["gameslobby-detail\nJumpProxy / GamePlayActivity"]
+      Agg["gameslobby 聚合\n只 registerIfAbsent NoOp"]
+    end
+
+    GCLobby --> Lobby
+    Galileo --> Agg
+    Lobby -->|"ISearchPageService.openSearch"| API
+    API --> SearchMod
+    SearchMod --> Common
+    SearchMod --> Found
+    SearchMod -->|"IDetailPageService.jumpPlayActivity"| Detail
+    Agg -->|"registerIfAbsent NoOp"| API
+    SearchMod -->|"Provider 覆盖 NoOp"| API
+    SearchMod -.->|"二期插槽 SearchForeignTabHost"| GCSearch
+```

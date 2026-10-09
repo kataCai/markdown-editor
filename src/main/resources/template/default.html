@@ -127,6 +127,11 @@
         #vditor.markdown-preview-table-col-resize * {
             cursor: col-resize;
         }
+
+        #vditor.markdown-preview-table-row-resize,
+        #vditor.markdown-preview-table-row-resize * {
+            cursor: row-resize;
+        }
     </style>
 </head>
 <body class="body">
@@ -2098,6 +2103,7 @@
     const PREVIEW_TABLE_EDGE_SCROLL_PX = 24;
     const PREVIEW_TABLE_EDGE_SCROLL_STEP_PX = 16;
     const PREVIEW_TABLE_COL_RESIZE_CLASS = "markdown-preview-table-col-resize";
+    const PREVIEW_TABLE_ROW_RESIZE_CLASS = "markdown-preview-table-row-resize";
     const PREVIEW_TABLE_GUIDE_CLASS = "markdown-preview-table-resize-guide";
     const previewTableResizeState = {
         sizesByKey: {},
@@ -2450,6 +2456,10 @@
         if (rect.right - event.clientX <= PREVIEW_TABLE_RESIZE_HIT_PX) {
             return {kind: "column", cell: cell, table: table, columnIndex: cell.cellIndex};
         }
+        if (rect.bottom - event.clientY <= PREVIEW_TABLE_RESIZE_HIT_PX) {
+            const row = cell.parentElement;
+            return {kind: "row", cell: cell, table: table, rowIndex: row ? row.rowIndex : -1};
+        }
         return null;
     }
 
@@ -2459,6 +2469,7 @@
             return;
         }
         root.classList.toggle(PREVIEW_TABLE_COL_RESIZE_CLASS, kind === "column");
+        root.classList.toggle(PREVIEW_TABLE_ROW_RESIZE_CLASS, kind === "row");
     }
 
     function ensurePreviewTableResizeGuide() {
@@ -2499,6 +2510,55 @@
         guide.style.display = "block";
     }
 
+    function showPreviewTableRowGuide(row) {
+        const guide = ensurePreviewTableResizeGuide();
+        const table = row && row.closest ? row.closest("table") : null;
+        if (!guide || !row || !table) {
+            return;
+        }
+        const rowRect = row.getBoundingClientRect();
+        const tableRect = table.getBoundingClientRect();
+        guide.style.left = tableRect.left + "px";
+        guide.style.top = (rowRect.bottom - 1) + "px";
+        guide.style.width = Math.max(tableRect.width, 1) + "px";
+        guide.style.height = "1px";
+        guide.style.display = "block";
+    }
+
+    function measurePreviewTableRowContentHeight(table, rowIndex) {
+        const row = table.rows && table.rows[rowIndex];
+        if (!row) {
+            return 0;
+        }
+        let contentHeight = 0;
+        for (let index = 0; index < row.cells.length; index += 1) {
+            if (row.cells[index].scrollHeight > contentHeight) {
+                contentHeight = row.cells[index].scrollHeight;
+            }
+        }
+        return contentHeight;
+    }
+
+    /**
+     * 已有行高时先撤掉这一行的规则再量内容高度，避免把撑开后的高度当成下限。
+     */
+    function measurePreviewTableRowFloor(table, key, rowIndex) {
+        const record = previewTableResizeState.sizesByKey[key];
+        const rowKey = String(rowIndex);
+        const hadHeight = !!(record && record.rowHeights && Object.prototype.hasOwnProperty.call(record.rowHeights, rowKey));
+        const previous = hadHeight ? record.rowHeights[rowKey] : 0;
+        if (hadHeight) {
+            delete record.rowHeights[rowKey];
+            applyPreviewTableSizeStyles();
+        }
+        const contentHeight = measurePreviewTableRowContentHeight(table, rowIndex);
+        if (hadHeight) {
+            record.rowHeights[rowKey] = previous;
+            applyPreviewTableSizeStyles();
+        }
+        return contentHeight;
+    }
+
     function previewTableNodeScrolls(node) {
         const style = window.getComputedStyle(node);
         return style.overflowX === "auto" || style.overflowX === "scroll"
@@ -2531,6 +2591,23 @@
         }
         record.columnWidths = null;
         if (!previewTableRecordHasRowHeights(record)) {
+            delete previewTableResizeState.sizesByKey[located.key];
+        }
+        applyPreviewTableSizeStyles();
+    }
+
+    function clearPreviewTableRowHeight(table, rowIndex) {
+        const located = locatePreviewTable(table);
+        if (!located) {
+            return;
+        }
+        const record = previewTableResizeState.sizesByKey[located.key];
+        if (!record || !record.rowHeights) {
+            return;
+        }
+        delete record.rowHeights[String(rowIndex)];
+        const hasColumns = !!(record.columnWidths && record.columnWidths.length);
+        if (!hasColumns && !previewTableRecordHasRowHeights(record)) {
             delete previewTableResizeState.sizesByKey[located.key];
         }
         applyPreviewTableSizeStyles();
@@ -2571,6 +2648,39 @@
         startPreviewTableEdgeScroll();
     }
 
+    function startPreviewTableRowDrag(hit, event) {
+        const located = locatePreviewTable(hit.table);
+        const row = hit.table.rows && hit.table.rows[hit.rowIndex];
+        if (!located || !row || hit.rowIndex < 0) {
+            return;
+        }
+        const existing = previewTableResizeState.sizesByKey[located.key];
+        const originHeight = Math.round(row.getBoundingClientRect().height);
+        const contentHeight = measurePreviewTableRowFloor(hit.table, located.key, hit.rowIndex);
+        previewTableResizeState.drag = {
+            kind: "row",
+            table: hit.table,
+            key: located.key,
+            rowIndex: hit.rowIndex,
+            originClient: event.clientY,
+            originHeight: originHeight,
+            contentHeight: contentHeight,
+            columnWidths: existing && existing.columnWidths ? existing.columnWidths.slice() : null,
+            rowHeights: clonePreviewTableRowHeights(existing),
+            scrollContainer: findPreviewTableScrollContainer(hit.table),
+            clientX: event.clientX,
+            clientY: event.clientY,
+            scrollOffset: 0,
+            moved: false,
+            previewRecord: null
+        };
+        syncPreviewTableResizeCursor("row");
+        showPreviewTableRowGuide(row);
+        document.addEventListener("mousemove", onPreviewTableResizeDragMove, true);
+        document.addEventListener("mouseup", onPreviewTableResizeMouseUp, true);
+        startPreviewTableEdgeScroll();
+    }
+
     function updatePreviewTableColumnDrag() {
         const drag = previewTableResizeState.drag;
         const width = Math.max(
@@ -2587,6 +2697,24 @@
         const cell = row && row.cells[drag.columnIndex];
         if (cell) {
             showPreviewTableColumnGuide(cell);
+        }
+    }
+
+    function updatePreviewTableRowDrag() {
+        const drag = previewTableResizeState.drag;
+        const height = Math.max(
+            drag.contentHeight,
+            Math.round(drag.originHeight + (drag.clientY - drag.originClient) + drag.scrollOffset)
+        );
+        drag.rowHeights[String(drag.rowIndex)] = height;
+        drag.previewRecord = {
+            columnWidths: drag.columnWidths,
+            rowHeights: drag.rowHeights
+        };
+        applyPreviewTableSizeStyles();
+        const row = drag.table.rows && drag.table.rows[drag.rowIndex];
+        if (row) {
+            showPreviewTableRowGuide(row);
         }
     }
 
@@ -2618,6 +2746,10 @@
             return;
         }
         syncPreviewTableResizeCursor(hit.kind);
+        if (hit.kind === "row") {
+            showPreviewTableRowGuide(hit.cell.parentElement);
+            return;
+        }
         showPreviewTableColumnGuide(hit.cell);
     }
 
@@ -2626,12 +2758,38 @@
             return;
         }
         const hit = findPreviewTableResizeHit(event);
-        if (!hit || hit.kind !== "column") {
+        if (!hit) {
             return;
         }
         event.preventDefault();
         event.stopPropagation();
+        if (hit.kind === "row") {
+            startPreviewTableRowDrag(hit, event);
+            return;
+        }
         startPreviewTableColumnDrag(hit, event);
+    }
+
+    function previewTableResizePointerMoved(drag) {
+        if (drag.scrollOffset !== 0) {
+            return true;
+        }
+        if (drag.kind === "row") {
+            return drag.clientY !== drag.originClient;
+        }
+        return drag.clientX !== drag.originClient;
+    }
+
+    function updateActivePreviewTableResizeDrag() {
+        const drag = previewTableResizeState.drag;
+        if (!drag) {
+            return;
+        }
+        if (drag.kind === "row") {
+            updatePreviewTableRowDrag();
+            return;
+        }
+        updatePreviewTableColumnDrag();
     }
 
     function onPreviewTableResizeDragMove(event) {
@@ -2642,14 +2800,14 @@
         event.preventDefault();
         drag.clientX = event.clientX;
         drag.clientY = event.clientY;
-        if (drag.clientX !== drag.originClient || drag.scrollOffset !== 0) {
+        if (previewTableResizePointerMoved(drag)) {
             drag.moved = true;
         }
         if (!drag.table.isConnected) {
             finishPreviewTableResizeDrag(false);
             return;
         }
-        updatePreviewTableColumnDrag();
+        updateActivePreviewTableResizeDrag();
     }
 
     function onPreviewTableResizeMouseUp(event) {
@@ -2663,11 +2821,15 @@
 
     function onPreviewTableResizeDoubleClick(event) {
         const hit = findPreviewTableResizeHit(event);
-        if (!hit || hit.kind !== "column") {
+        if (!hit) {
             return;
         }
         event.preventDefault();
         event.stopPropagation();
+        if (hit.kind === "row") {
+            clearPreviewTableRowHeight(hit.table, hit.rowIndex);
+            return;
+        }
         clearPreviewTableColumnWidths(hit.table);
     }
 
@@ -2700,33 +2862,47 @@
 
     function resolvePreviewTableEdgeDelta(drag) {
         const container = drag.scrollContainer;
-        if (!container || drag.kind !== "column") {
+        if (!container) {
             return 0;
         }
         const rect = container.getBoundingClientRect();
-        if (drag.clientX < rect.left + PREVIEW_TABLE_EDGE_SCROLL_PX) {
+        if (drag.kind === "column") {
+            return resolvePreviewTableAxisEdgeDelta(drag.clientX, rect.left, rect.right);
+        }
+        return resolvePreviewTableAxisEdgeDelta(drag.clientY, rect.top, rect.bottom);
+    }
+
+    function resolvePreviewTableAxisEdgeDelta(client, start, end) {
+        if (client < start + PREVIEW_TABLE_EDGE_SCROLL_PX) {
             return -PREVIEW_TABLE_EDGE_SCROLL_STEP_PX;
         }
-        if (drag.clientX > rect.right - PREVIEW_TABLE_EDGE_SCROLL_PX) {
+        if (client > end - PREVIEW_TABLE_EDGE_SCROLL_PX) {
             return PREVIEW_TABLE_EDGE_SCROLL_STEP_PX;
         }
         return 0;
     }
 
-    function scrollPreviewTableContainer(container, delta) {
+    function scrollPreviewTableContainer(container, axis, delta) {
         if (!container || !delta) {
             return 0;
         }
-        const maxScroll = container.scrollWidth - container.clientWidth;
-        const before = container.scrollLeft;
+        const horizontal = axis === "x";
+        const maxScroll = horizontal
+            ? container.scrollWidth - container.clientWidth
+            : container.scrollHeight - container.clientHeight;
+        const before = horizontal ? container.scrollLeft : container.scrollTop;
         if (delta > 0 && before >= maxScroll - 0.5) {
             return 0;
         }
         if (delta < 0 && before <= 0) {
             return 0;
         }
-        container.scrollLeft = before + delta;
-        return container.scrollLeft - before;
+        if (horizontal) {
+            container.scrollLeft = before + delta;
+            return container.scrollLeft - before;
+        }
+        container.scrollTop = before + delta;
+        return container.scrollTop - before;
     }
 
     function applyPreviewTableEdgeScroll() {
@@ -2734,7 +2910,8 @@
         if (!drag) {
             return;
         }
-        const consumed = scrollPreviewTableContainer(drag.scrollContainer, resolvePreviewTableEdgeDelta(drag));
+        const axis = drag.kind === "column" ? "x" : "y";
+        const consumed = scrollPreviewTableContainer(drag.scrollContainer, axis, resolvePreviewTableEdgeDelta(drag));
         if (!consumed) {
             return;
         }
@@ -2744,7 +2921,7 @@
             finishPreviewTableResizeDrag(false);
             return;
         }
-        updatePreviewTableColumnDrag();
+        updateActivePreviewTableResizeDrag();
     }
 
     function bindPreviewTableResize() {

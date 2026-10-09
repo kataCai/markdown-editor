@@ -1187,8 +1187,9 @@ var mermaidRender = function (element, cdn, theme) {
             altFontFamily: "sans-serif",
             fontFamily: "sans-serif",
             startOnLoad: false,
+            htmlLabels: true,
             flowchart: {
-                htmlLabels: true,
+                wrappingWidth: 480,
                 useMaxWidth: !0
             },
             sequence: {

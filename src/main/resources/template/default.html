@@ -53,6 +53,26 @@
             opacity: 0.9;
         }
 
+        /* Mermaid 在 body 上的临时节点里测量标签，量完才把 SVG 放进 .language-mermaid。
+           两处都要固定同一套字体，否则 foreignObject 宽度按另一套字形算完就会裁字。
+           nowrap 和 max-width 是 Mermaid 写在 div 上的内联样式，必须更高优先级才能在测量时生效。 */
+        .vditor-reset pre > code.language-mermaid,
+        div[id^="dmermaid"] {
+            font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif;
+            font-size: 16px;
+            white-space: normal;
+        }
+
+        .vditor-reset .language-mermaid foreignObject div,
+        div[id^="dmermaid"] foreignObject div {
+            font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif !important;
+            font-size: 16px !important;
+            white-space: pre-line !important;
+            max-width: none !important;
+            overflow-wrap: anywhere !important;
+            display: inline-block !important;
+        }
+
         /* Mermaid 预览块右上角放大按钮的定位容器。
            这里只给已装饰的 Mermaid 块补相对定位，避免额外包裹节点破坏源码块映射顺序。 */
         #vditor .markdown-preview-mermaid-zoomable {

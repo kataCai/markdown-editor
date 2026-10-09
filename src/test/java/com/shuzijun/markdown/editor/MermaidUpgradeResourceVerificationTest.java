@@ -47,6 +47,22 @@ public class MermaidUpgradeResourceVerificationTest {
     private static final Path VDITOR_METHOD_MIN_JS_PATH = Path.of("src/main/resources/vditor/dist/method.min.js");
 
     /**
+     * 预览页实际加载的 Vditor 打包脚本。
+     */
+    private static final Path VDITOR_INDEX_MIN_JS_PATH = Path.of("src/main/resources/vditor/dist/index.min.js");
+
+    /**
+     * 预览和导出都必须带上的 Mermaid 标签测量配置。
+     */
+    private static final String MERMAID_HTML_LABEL_CONFIG =
+            "htmlLabels:!0,flowchart:{wrappingWidth:480,useMaxWidth:!0}";
+
+    /**
+     * 只作用于 Mermaid 代码块的换行替换。源码里的反斜杠 n 要换成 br。
+     */
+    private static final String MERMAID_BACKSLASH_N_REPLACE = "textContent.replace(/\\\\n/g,\"<br/>\")";
+
+    /**
      * Mermaid 实际运行时资源路径。
      */
     private static final Path MERMAID_MIN_JS_PATH = Path.of("src/main/resources/vditor/dist/js/mermaid/mermaid.min.js");
@@ -240,8 +256,8 @@ public class MermaidUpgradeResourceVerificationTest {
 
     /**
      * 验证仓库里保留了一组可重复使用的 Mermaid 升级验收样例。
-     * 该测试约束样例至少覆盖 6 个 Mermaid 代码块，并同时包含旧语法常见场景、升级后重点关注的图表类型，
-     * 以及一组更适合放大查看回归的“大尺寸图表”样例，
+     * 该测试约束样例覆盖 8 个 Mermaid 代码块，并同时包含旧语法常见场景、升级后重点关注的图表类型，
+     * 以及一组更适合放大查看回归的“大尺寸图表”样例和两组标签换行样例，
      * 这样后续继续升级时，可以直接拿同一份 Markdown 做预览、HTML 导出和 PDF 导出的手工回归。
      *
      * @throws IOException 当样例资源读取失败时抛出，用于暴露回归基线缺失的问题
@@ -251,7 +267,7 @@ public class MermaidUpgradeResourceVerificationTest {
         String baselineMarkdown = readProjectFile(MERMAID_BASELINE_PATH);
         int mermaidFenceCount = countOccurrences(baselineMarkdown, "```mermaid");
 
-        Assert.assertEquals("升级验收基线应固定为 6 组 Mermaid 样例，便于人工回归复用", 6, mermaidFenceCount);
+        Assert.assertEquals("升级验收基线应固定为 8 组 Mermaid 样例，便于人工回归复用", 8, mermaidFenceCount);
         Assert.assertTrue("基线样例应覆盖传统 flowchart 语法",
                 baselineMarkdown.contains("flowchart TD"));
         Assert.assertTrue("基线样例应覆盖传统 sequenceDiagram 语法",
@@ -264,6 +280,42 @@ public class MermaidUpgradeResourceVerificationTest {
                 baselineMarkdown.contains("quadrantChart"));
         Assert.assertTrue("基线样例应覆盖更适合放大查看回归的宽图 Mermaid 场景",
                 baselineMarkdown.contains("Zoom Stress Flowchart"));
+        Assert.assertTrue("基线样例应覆盖状态图里的换行转移标签",
+                baselineMarkdown.contains("stateDiagram-v2")
+                        && baselineMarkdown.contains("点击搜索区\\n(A 组)"));
+        Assert.assertTrue("基线样例应覆盖模块图里的多行节点和无空格边标签",
+                baselineMarkdown.contains("flowchart TB")
+                        && baselineMarkdown.contains("fragment_gc_games_lobby.xml")
+                        && baselineMarkdown.contains("ISearchPageService.openSearch")
+                        && baselineMarkdown.contains("IDetailPageService.jumpPlayActivity"));
+    }
+
+    /**
+     * 验证标签换行修复同时写进预览脚本和导出脚本。
+     * 只改未压缩的 index.js 时，JCEF 仍会加载 index.min.js，导出仍会走 method.min.js。
+     *
+     * @throws IOException 当模板或打包脚本读取失败时抛出
+     */
+    @Test
+    public void shouldKeepMermaidLabelWrapFixesInPreviewAndExport() throws IOException {
+        String defaultHtml = readProjectFile(DEFAULT_HTML_PATH);
+        String indexMinJs = readProjectFile(VDITOR_INDEX_MIN_JS_PATH);
+        String methodMinJs = readProjectFile(VDITOR_METHOD_MIN_JS_PATH);
+
+        Assert.assertTrue("预览模板应在测量节点和最终图块上取消 Mermaid 的 nowrap 宽度上限",
+                defaultHtml.contains("div[id^=\"dmermaid\"]")
+                        && defaultHtml.contains("white-space: pre-line !important;")
+                        && defaultHtml.contains("max-width: none !important;"));
+        Assert.assertTrue("预览脚本应使用全局 htmlLabels，并把 flowchart.wrappingWidth 写成 480",
+                indexMinJs.contains(MERMAID_HTML_LABEL_CONFIG));
+        Assert.assertTrue("导出脚本应使用同一套 htmlLabels 和 wrappingWidth",
+                methodMinJs.contains(MERMAID_HTML_LABEL_CONFIG));
+        Assert.assertTrue("预览脚本应在渲染前把 Mermaid 源码里的反斜杠 n 换成 br",
+                indexMinJs.contains(MERMAID_BACKSLASH_N_REPLACE));
+        Assert.assertTrue("导出脚本应在渲染前做同样的反斜杠 n 替换",
+                methodMinJs.contains(MERMAID_BACKSLASH_N_REPLACE));
+        Assert.assertTrue("放大查看仍应克隆当前 SVG，而不是另画一套图",
+                defaultHtml.contains("sourceSvgElement.cloneNode(true)"));
     }
 
     /**

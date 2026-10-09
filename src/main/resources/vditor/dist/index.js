@@ -3835,7 +3835,8 @@ var mermaidRender = function (element, cdn, theme) {
                         _a.label = 1;
                     case 1:
                         _a.trys.push([1, 3, , 4]);
-                        return [4 /*yield*/, mermaid.render(id, item.textContent)];
+                        // 状态图把源码里的 \n 当成两个字符。只替换送进 Mermaid 的代码块，不改普通 Markdown。
+                        return [4 /*yield*/, mermaid.render(id, item.textContent.replace(/\\n/g, "<br/>"))];
                     case 2:
                         mermaidData = _a.sent();
                         item.innerHTML = mermaidData.svg;

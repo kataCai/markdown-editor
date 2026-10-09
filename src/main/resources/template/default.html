@@ -112,111 +112,6 @@
             height: 16px;
             fill: currentColor;
         }
-
-        /* Mermaid 悬浮查看层覆盖整个预览页面，用于承载放大后的 SVG 查看交互。 */
-        .markdown-preview-figure-viewer {
-            position: fixed;
-            inset: 0;
-            z-index: 2147483000;
-            display: flex;
-            flex-direction: column;
-            background: rgba(12, 16, 23, 0.78);
-            backdrop-filter: blur(4px);
-        }
-
-        /* 查看层工具条固定在右上角，承载放大、缩小、重置和关闭操作。 */
-        .markdown-preview-figure-viewer__toolbar {
-            display: flex;
-            justify-content: flex-end;
-            gap: 8px;
-            padding: 16px;
-            pointer-events: none;
-        }
-
-        .markdown-preview-figure-viewer__toolbar-group {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            padding: 8px;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 10px;
-            background: rgba(18, 21, 27, 0.76);
-            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
-            pointer-events: auto;
-        }
-
-        .markdown-preview-figure-viewer__button {
-            width: 32px;
-            min-width: 32px;
-            height: 32px;
-            padding: 0;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            border: 1px solid rgba(255, 255, 255, 0.12);
-            border-radius: 7px;
-            background: rgba(28, 33, 42, 0.86);
-            color: #f5f7fa;
-            cursor: pointer;
-            font-size: 0;
-            line-height: 1;
-            transition: background-color 0.16s ease-in-out, border-color 0.16s ease-in-out, color 0.16s ease-in-out;
-        }
-
-        .markdown-preview-figure-viewer__button svg {
-            width: 16px;
-            height: 16px;
-            display: block;
-            fill: none;
-            stroke: currentColor;
-            stroke-width: 1.8;
-            stroke-linecap: round;
-            stroke-linejoin: round;
-        }
-
-        .markdown-preview-figure-viewer__button:hover,
-        .markdown-preview-figure-viewer__button:focus-visible {
-            background: rgba(49, 77, 121, 0.92);
-            border-color: rgba(129, 169, 255, 0.64);
-            outline: none;
-        }
-
-        /* 查看层滚动区域负责承接大图浏览，不再占用正文滚动容器。 */
-        .markdown-preview-figure-viewer__viewport {
-            flex: 1;
-            overflow: auto;
-            padding: 0 24px 24px;
-        }
-
-        .markdown-preview-figure-viewer__canvas {
-            min-width: 100%;
-            min-height: 100%;
-            display: flex;
-            justify-content: center;
-            align-items: flex-start;
-        }
-
-        /* 内容容器显式维护缩放后的几何尺寸，让滚动条能感知放大后的真实占位。 */
-        .markdown-preview-figure-viewer__content {
-            position: relative;
-            margin: 24px auto;
-            transform-origin: top left;
-        }
-
-        .markdown-preview-figure-viewer__viewport {
-            cursor: grab;
-        }
-
-        .markdown-preview-figure-viewer__viewport.is-dragging {
-            cursor: grabbing;
-            user-select: none;
-        }
-
-        .markdown-preview-figure-viewer__content svg {
-            display: block;
-            max-width: none;
-            height: auto;
-        }
     </style>
 </head>
 <body class="body">
@@ -335,42 +230,20 @@
         setValueSinceCapture: false
     };
     /**
-     * Mermaid 预览增强所需的固定 class、attribute 与缩放边界。
-     * 这些字面量会被多个按钮、查看层和事件隔离入口复用，统一收口后更容易避免后续改名漏改。
+     * Mermaid 预览块装饰所需的固定 class 与 attribute。
+     * 放大查看本身改由宿主窗口承接，这里只保留右上角按钮的挂载标记。
      */
     const MERMAID_PREVIEW_BOUND_ATTRIBUTE = "data-mermaid-preview-bound";
     const MERMAID_PREVIEW_ZOOMABLE_CLASS = "markdown-preview-mermaid-zoomable";
     const MERMAID_PREVIEW_TRIGGER_CLASS = "markdown-preview-mermaid-zoom-trigger";
-    const MERMAID_PREVIEW_VIEWER_CLASS = "markdown-preview-figure-viewer";
-    const MERMAID_PREVIEW_SCALE_MIN = 0.5;
-    const MERMAID_PREVIEW_SCALE_MAX = 4;
-    const MERMAID_PREVIEW_SCALE_STEP = 0.2;
-    const MERMAID_PREVIEW_DRAG_THRESHOLD_PX = 6;
+    const MERMAID_PREVIEW_REQUEST_TYPE = "previewMermaidRequest";
     /**
-     * Mermaid 悬浮查看层的运行时状态。
-     * 状态只保存在当前页面作用域，避免污染宿主全局或跨页面共享状态。
+     * Mermaid 按钮重扫状态。
+     * 只保留观察器和防抖计时器，缩放与拖拽状态改到独立查看窗口。
      */
     const mermaidPreviewViewerState = {
-        root: null,
-        viewport: null,
-        content: null,
-        svgElement: null,
-        open: false,
-        scale: 1,
-        minScale: MERMAID_PREVIEW_SCALE_MIN,
-        maxScale: MERMAID_PREVIEW_SCALE_MAX,
-        step: MERMAID_PREVIEW_SCALE_STEP,
-        baseWidth: 0,
-        baseHeight: 0,
-        previousBodyOverflow: "",
         mutationObserver: null,
-        decorationTimer: 0,
-        dragPointerId: null,
-        dragStarted: false,
-        dragStartClientX: 0,
-        dragStartClientY: 0,
-        dragStartScrollLeft: 0,
-        dragStartScrollTop: 0
+        decorationTimer: 0
     };
 
     function debugPreviewSync(message, detail) {
@@ -503,9 +376,6 @@
         scheduleMermaidPreviewDecoration("windowOnload");
         window.setPreviewToolbarVisible(previewToolbarVisible);
         document.addEventListener('mousedown', (event) => {
-            if (isMermaidPreviewViewerEventTarget(event.target)) {
-                return;
-            }
             if (event.button === 2) {
                 if (window.getSelection().isCollapsed) {
                     document.onselectstart =function(){
@@ -706,39 +576,7 @@
     }
 
     /**
-     * 判断查看层当前是否处于打开状态。
-     *
-     * @return 查看层根节点和关键内容节点都存在时返回 true，否则返回 false
-     */
-    function isMermaidPreviewViewerOpen() {
-        return !!(mermaidPreviewViewerState.open
-            && mermaidPreviewViewerState.root
-            && mermaidPreviewViewerState.viewport
-            && mermaidPreviewViewerState.content
-            && mermaidPreviewViewerState.svgElement);
-    }
-
-    /**
-     * 判断事件目标是否命中 Mermaid 悬浮查看层。
-     * 现有预览联动监听挂在 document 级别，因此必须在入口处显式排除查看层事件，避免滚轮和点击串扰。
-     *
-     * @param eventTarget 原始事件目标，可能是元素节点，也可能是文本节点
-     * @return 命中查看层根节点时返回 true，否则返回 false
-     */
-    function isMermaidPreviewViewerEventTarget(eventTarget) {
-        const viewerRoot = mermaidPreviewViewerState.root
-            || document.querySelector("." + MERMAID_PREVIEW_VIEWER_CLASS);
-        if (!viewerRoot || !eventTarget) {
-            return false;
-        }
-        const normalizedTarget = eventTarget.nodeType === Node.ELEMENT_NODE
-            ? eventTarget
-            : eventTarget.parentElement;
-        return !!(normalizedTarget && viewerRoot.contains(normalizedTarget));
-    }
-
-    /**
-     * 估算 Mermaid SVG 在查看层中的基础尺寸。
+     * 估算 Mermaid SVG 在独立查看窗口中的基础尺寸。
      * 优先复用当前预览中已经排版完成的几何尺寸，拿不到时再回退到 viewBox 或宽高属性，避免把 0 尺寸 SVG 放进查看层。
      *
      * @param svgElement 当前预览中已渲染成功的 Mermaid SVG
@@ -897,327 +735,24 @@
     }
 
     /**
-     * 创建查看层工具栏按钮，并统一绑定事件隔离逻辑。
-     * 查看层按钮不应抢占正文焦点或触发 document 级别联动监听，因此按下和点击都要阻断冒泡。
+     * 把已经渲染好的 Mermaid SVG 序列化成 HTML 片段。
+     * 使用克隆节点的 innerHTML，保留 foreignObject 里的 HTML 标签，避免 XML 解析丢掉命名空间。
      *
-     * @param iconName 按钮图标名称，只允许使用当前查看层定义的四个图标标识
-     * @param title 按钮提示文案
-     * @param onClick 点击后的业务处理函数
-     * @return 已绑定事件的按钮节点
+     * @param svgElement 当前预览中已渲染成功的 Mermaid SVG
+     * @return 可交给宿主查看窗口插入的 HTML 片段
      */
-    function buildMermaidPreviewViewerButton(iconName, title, onClick) {
-        const buttonElement = document.createElement("button");
-        buttonElement.className = "markdown-preview-figure-viewer__button";
-        buttonElement.type = "button";
-        buttonElement.innerHTML = getMermaidPreviewViewerIconMarkup(iconName);
-        buttonElement.setAttribute("title", title);
-        buttonElement.setAttribute("aria-label", title);
-        buttonElement.addEventListener("mousedown", function (event) {
-            event.preventDefault();
-            event.stopPropagation();
-        }, true);
-        buttonElement.addEventListener("click", function (event) {
-            event.preventDefault();
-            event.stopPropagation();
-            onClick();
-        }, true);
-        return buttonElement;
+    function serializeMermaidPreviewSvg(svgElement) {
+        const holder = document.createElement("div");
+        const clone = svgElement.cloneNode(true);
+        clone.removeAttribute("width");
+        clone.removeAttribute("height");
+        holder.appendChild(clone);
+        return holder.innerHTML;
     }
 
     /**
-     * 构造 Mermaid 查看层工具栏使用的内联 SVG 图标。
-     * 图标直接嵌入模板，避免依赖字体、外部图标库或额外资源加载，保证 JCEF 和不同主题下都能保持稳定形状。
-     * 未知图标名称回退为关闭图标，防止按钮出现空白且保留明确的视觉反馈。
-     *
-     * @param iconName 图标名称，支持 zoom-in、zoom-out、reset 和 close
-     * @return 包含 data-mermaid-viewer-icon 标记的 SVG 字符串
-     */
-    function getMermaidPreviewViewerIconMarkup(iconName) {
-        if (iconName === "zoom-in") {
-            return "<svg data-mermaid-viewer-icon=\"zoom-in\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">"
-                + "<circle cx=\"10.5\" cy=\"10.5\" r=\"5.5\"></circle>"
-                + "<path d=\"M15 15l4.25 4.25\"></path>"
-                + "<path d=\"M10.5 8v5M8 10.5h5\"></path>"
-                + "</svg>";
-        }
-        if (iconName === "zoom-out") {
-            return "<svg data-mermaid-viewer-icon=\"zoom-out\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">"
-                + "<circle cx=\"10.5\" cy=\"10.5\" r=\"5.5\"></circle>"
-                + "<path d=\"M15 15l4.25 4.25\"></path>"
-                + "<path d=\"M8 10.5h5\"></path>"
-                + "</svg>";
-        }
-        if (iconName === "reset") {
-            return "<svg data-mermaid-viewer-icon=\"reset\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">"
-                + "<path d=\"M6.25 9.25A6.75 6.75 0 1 1 6.5 15\"></path>"
-                + "<path d=\"M6.25 5.75v3.5h3.5\"></path>"
-                + "</svg>";
-        }
-        return "<svg data-mermaid-viewer-icon=\"close\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">"
-            + "<path d=\"M6.5 6.5l11 11M17.5 6.5l-11 11\"></path>"
-            + "</svg>";
-    }
-
-    /**
-     * 在查看层中绑定滚轮缩放。
-     * 滚轮事件只在查看层内部消费，避免把图形查看动作误上报成正文滚动意图。
-     *
-     * @param container 查看层滚动容器
-     */
-    function bindMermaidPreviewWheel(container) {
-        if (!container || container.dataset.mermaidPreviewWheelBound === "true") {
-            return;
-        }
-        container.dataset.mermaidPreviewWheelBound = "true";
-        container.addEventListener("wheel", function (event) {
-            if (!isMermaidPreviewViewerEventTarget(event.target)) {
-                return;
-            }
-            if (!event || event.deltaY === 0) {
-                return;
-            }
-            event.preventDefault();
-            event.stopPropagation();
-            const delta = event.deltaY < 0 ? mermaidPreviewViewerState.step : -mermaidPreviewViewerState.step;
-            updateMermaidPreviewScale(mermaidPreviewViewerState.scale + delta, "wheel");
-        }, {passive: false});
-    }
-
-    /**
-     * 收口 Mermaid 查看层的拖拽视觉状态。
-     * 查看层关闭、指针取消或拖拽结束时都需要复用同一出口，避免 viewport 残留抓取光标。
-     */
-    function syncMermaidPreviewDragCursor() {
-        if (!mermaidPreviewViewerState.viewport) {
-            return;
-        }
-        mermaidPreviewViewerState.viewport.classList.toggle("is-dragging", !!mermaidPreviewViewerState.dragStarted);
-    }
-
-    /**
-     * 结束当前 Mermaid 查看层拖拽状态并释放捕获。
-     * 这里只回收查看层内部的临时拖拽状态，不修改正文联动标志，避免把 viewer 生命周期和正文状态耦合。
-     *
-     * @param event 触发拖拽结束的原始事件；为空时表示在查看层关闭流程中做兜底清理
-     */
-    function finishMermaidPreviewDrag(event) {
-        const viewport = mermaidPreviewViewerState.viewport;
-        const pointerId = mermaidPreviewViewerState.dragPointerId;
-        if (viewport && typeof pointerId === "number"
-            && typeof viewport.hasPointerCapture === "function"
-            && viewport.hasPointerCapture(pointerId)
-            && typeof viewport.releasePointerCapture === "function") {
-            viewport.releasePointerCapture(pointerId);
-        }
-        mermaidPreviewViewerState.dragPointerId = null;
-        mermaidPreviewViewerState.dragStarted = false;
-        mermaidPreviewViewerState.dragStartClientX = 0;
-        mermaidPreviewViewerState.dragStartClientY = 0;
-        mermaidPreviewViewerState.dragStartScrollLeft = 0;
-        mermaidPreviewViewerState.dragStartScrollTop = 0;
-        syncMermaidPreviewDragCursor();
-        if (event) {
-            event.preventDefault();
-            event.stopPropagation();
-        }
-    }
-
-    /**
-     * 在查看层 viewport 上绑定拖拽平移能力。
-     * 主路径优先使用 pointer 事件和 capture；当运行环境不支持时，再回退到传统 mouse 事件，保证 JCEF 下的兼容性。
-     *
-     * @param container 查看层滚动容器
-     */
-    function bindMermaidPreviewDrag(container) {
-        if (!container || container.dataset.mermaidPreviewDragBound === "true") {
-            return;
-        }
-        container.dataset.mermaidPreviewDragBound = "true";
-        /**
-         * 记录一次新的拖拽起点。
-         * 这里不立即切到 dragging 态，而是等待移动距离超过阈值，避免轻点被误判成拖拽。
-         *
-         * @param pointerId 当前交互对应的 pointer id；mouse fallback 时传 -1
-         * @param clientX 指针按下时的屏幕横坐标
-         * @param clientY 指针按下时的屏幕纵坐标
-         */
-        function startDrag(pointerId, clientX, clientY) {
-            mermaidPreviewViewerState.dragPointerId = pointerId;
-            mermaidPreviewViewerState.dragStarted = false;
-            mermaidPreviewViewerState.dragStartClientX = clientX;
-            mermaidPreviewViewerState.dragStartClientY = clientY;
-            mermaidPreviewViewerState.dragStartScrollLeft = container.scrollLeft;
-            mermaidPreviewViewerState.dragStartScrollTop = container.scrollTop;
-            syncMermaidPreviewDragCursor();
-        }
-
-        /**
-         * 根据当前指针位置推进拖拽平移。
-         * 通过直接改写 viewport 的滚动偏移实现“拖动画布”的体验，不移动克隆后的 SVG 节点本身。
-         *
-         * @param clientX 当前指针横坐标
-         * @param clientY 当前指针纵坐标
-         */
-        function moveDrag(clientX, clientY) {
-            if (mermaidPreviewViewerState.dragPointerId === null) {
-                return;
-            }
-            const deltaX = clientX - mermaidPreviewViewerState.dragStartClientX;
-            const deltaY = clientY - mermaidPreviewViewerState.dragStartClientY;
-            if (!mermaidPreviewViewerState.dragStarted) {
-                if (Math.abs(deltaX) < MERMAID_PREVIEW_DRAG_THRESHOLD_PX
-                    && Math.abs(deltaY) < MERMAID_PREVIEW_DRAG_THRESHOLD_PX) {
-                    return;
-                }
-                mermaidPreviewViewerState.dragStarted = true;
-                syncMermaidPreviewDragCursor();
-            }
-            container.scrollLeft = mermaidPreviewViewerState.dragStartScrollLeft - deltaX;
-            container.scrollTop = mermaidPreviewViewerState.dragStartScrollTop - deltaY;
-        }
-
-        if (window.PointerEvent) {
-            container.addEventListener("pointerdown", function (event) {
-                if (!isMermaidPreviewViewerEventTarget(event.target) || !event || event.button !== 0) {
-                    return;
-                }
-                startDrag(event.pointerId, event.clientX, event.clientY);
-                if (typeof container.setPointerCapture === "function") {
-                    container.setPointerCapture(event.pointerId);
-                }
-                event.preventDefault();
-                event.stopPropagation();
-            }, true);
-            container.addEventListener("pointermove", function (event) {
-                if (!event || event.pointerId !== mermaidPreviewViewerState.dragPointerId) {
-                    return;
-                }
-                moveDrag(event.clientX, event.clientY);
-                if (mermaidPreviewViewerState.dragStarted) {
-                    event.preventDefault();
-                    event.stopPropagation();
-                }
-            }, true);
-            container.addEventListener("pointerup", function (event) {
-                if (!event || event.pointerId !== mermaidPreviewViewerState.dragPointerId) {
-                    return;
-                }
-                finishMermaidPreviewDrag(event);
-            }, true);
-            container.addEventListener("pointercancel", function (event) {
-                if (!event || event.pointerId !== mermaidPreviewViewerState.dragPointerId) {
-                    return;
-                }
-                finishMermaidPreviewDrag(event);
-            }, true);
-            container.addEventListener("lostpointercapture", function () {
-                if (mermaidPreviewViewerState.dragPointerId !== null) {
-                    finishMermaidPreviewDrag(null);
-                }
-            }, true);
-            return;
-        }
-
-        container.addEventListener("mousedown", function (event) {
-            if (!isMermaidPreviewViewerEventTarget(event.target) || !event || event.button !== 0) {
-                return;
-            }
-            startDrag(-1, event.clientX, event.clientY);
-            event.preventDefault();
-            event.stopPropagation();
-        }, true);
-        window.addEventListener("mousemove", function (event) {
-            if (!event || mermaidPreviewViewerState.dragPointerId !== -1 || !isMermaidPreviewViewerOpen()) {
-                return;
-            }
-            moveDrag(event.clientX, event.clientY);
-            if (mermaidPreviewViewerState.dragStarted) {
-                event.preventDefault();
-            }
-        }, true);
-        window.addEventListener("mouseup", function (event) {
-            if (!event || mermaidPreviewViewerState.dragPointerId !== -1) {
-                return;
-            }
-            finishMermaidPreviewDrag(event);
-        }, true);
-    }
-
-    /**
-     * 统一更新查看层的 SVG 缩放比例。
-     * 这里显式维护内容容器宽高，让滚动条感知放大后的真实占位，同时尽量保持缩放前后的可视中心连续。
-     *
-     * @param nextScale 期望设置的缩放比例
-     * @param source 本次缩放的触发来源，用于区分打开/重置和普通缩放时的滚动定位策略
-     */
-    function updateMermaidPreviewScale(nextScale, source) {
-        if (!isMermaidPreviewViewerOpen()) {
-            return;
-        }
-        const viewport = mermaidPreviewViewerState.viewport;
-        const content = mermaidPreviewViewerState.content;
-        const svgElement = mermaidPreviewViewerState.svgElement;
-        const previousScale = mermaidPreviewViewerState.scale || 1;
-        const previousWidth = mermaidPreviewViewerState.baseWidth * previousScale;
-        const previousHeight = mermaidPreviewViewerState.baseHeight * previousScale;
-        const centerX = viewport.scrollLeft + viewport.clientWidth / 2;
-        const centerY = viewport.scrollTop + viewport.clientHeight / 2;
-        const clampedScale = Math.max(
-            mermaidPreviewViewerState.minScale,
-            Math.min(mermaidPreviewViewerState.maxScale, Math.round(nextScale * 100) / 100)
-        );
-        mermaidPreviewViewerState.scale = clampedScale;
-        svgElement.style.width = mermaidPreviewViewerState.baseWidth + "px";
-        svgElement.style.height = mermaidPreviewViewerState.baseHeight + "px";
-        svgElement.style.transformOrigin = "top left";
-        svgElement.style.transform = "scale(" + clampedScale + ")";
-        content.style.width = mermaidPreviewViewerState.baseWidth * clampedScale + "px";
-        content.style.height = mermaidPreviewViewerState.baseHeight * clampedScale + "px";
-        if (source === "open" || source === "reset") {
-            viewport.scrollLeft = Math.max(0, (mermaidPreviewViewerState.baseWidth * clampedScale - viewport.clientWidth) / 2);
-            viewport.scrollTop = 0;
-            return;
-        }
-        const nextWidth = mermaidPreviewViewerState.baseWidth * clampedScale;
-        const nextHeight = mermaidPreviewViewerState.baseHeight * clampedScale;
-        const ratioX = previousWidth > 0 ? centerX / previousWidth : 0.5;
-        const ratioY = previousHeight > 0 ? centerY / previousHeight : 0.5;
-        viewport.scrollLeft = Math.max(0, ratioX * nextWidth - viewport.clientWidth / 2);
-        viewport.scrollTop = Math.max(0, ratioY * nextHeight - viewport.clientHeight / 2);
-    }
-
-    /**
-     * 将查看层缩放恢复到初始比例。
-     * 需求里的“撤销”在本次实现中解释为重置缩放状态，而不是编辑内容撤销。
-     */
-    function resetMermaidPreviewScale() {
-        updateMermaidPreviewScale(1, "reset");
-    }
-
-    /**
-     * 关闭 Mermaid 悬浮查看层并恢复页面原始滚动状态。
-     * 查看层关闭时只回收当前临时 DOM 和 body 样式，不触碰正文选区与宿主同步状态。
-     */
-    function closeMermaidPreviewViewer() {
-        finishMermaidPreviewDrag(null);
-        if (mermaidPreviewViewerState.root && mermaidPreviewViewerState.root.parentNode) {
-            mermaidPreviewViewerState.root.parentNode.removeChild(mermaidPreviewViewerState.root);
-        }
-        document.body.style.overflow = mermaidPreviewViewerState.previousBodyOverflow || "";
-        mermaidPreviewViewerState.root = null;
-        mermaidPreviewViewerState.viewport = null;
-        mermaidPreviewViewerState.content = null;
-        mermaidPreviewViewerState.svgElement = null;
-        mermaidPreviewViewerState.open = false;
-        mermaidPreviewViewerState.scale = 1;
-        mermaidPreviewViewerState.baseWidth = 0;
-        mermaidPreviewViewerState.baseHeight = 0;
-        mermaidPreviewViewerState.previousBodyOverflow = "";
-    }
-
-    /**
-     * 打开 Mermaid 悬浮查看层，并把当前块中的 SVG 克隆进去。
-     * 这里明确克隆 SVG 而不是移动原节点，避免破坏正文中的 Mermaid 渲染结构与源码映射关系。
+     * 请求宿主打开整屏 Mermaid 查看窗口。
+     * 页面只上报已经渲染好的 SVG 和基础尺寸，不再把遮罩挂进当前预览页。
      *
      * @param sourceElement 被点击的 Mermaid 渲染块
      */
@@ -1230,58 +765,16 @@
             return;
         }
         const viewerSize = resolveMermaidPreviewSvgSize(sourceSvgElement);
-        const viewerRoot = document.createElement("div");
-        viewerRoot.className = MERMAID_PREVIEW_VIEWER_CLASS;
-        viewerRoot.setAttribute("role", "dialog");
-        viewerRoot.setAttribute("aria-modal", "true");
-        viewerRoot.setAttribute("aria-label", "Mermaid 图查看器");
-        const toolbarElement = document.createElement("div");
-        toolbarElement.className = "markdown-preview-figure-viewer__toolbar";
-        const toolbarGroupElement = document.createElement("div");
-        toolbarGroupElement.className = "markdown-preview-figure-viewer__toolbar-group";
-        toolbarGroupElement.appendChild(buildMermaidPreviewViewerButton("zoom-in", "放大", function () {
-            updateMermaidPreviewScale(mermaidPreviewViewerState.scale + mermaidPreviewViewerState.step, "zoomIn");
-        }));
-        toolbarGroupElement.appendChild(buildMermaidPreviewViewerButton("zoom-out", "缩小", function () {
-            updateMermaidPreviewScale(mermaidPreviewViewerState.scale - mermaidPreviewViewerState.step, "zoomOut");
-        }));
-        toolbarGroupElement.appendChild(buildMermaidPreviewViewerButton("reset", "重置缩放", function () {
-            resetMermaidPreviewScale();
-        }));
-        toolbarGroupElement.appendChild(buildMermaidPreviewViewerButton("close", "关闭查看层", function () {
-            closeMermaidPreviewViewer();
-        }));
-        toolbarElement.appendChild(toolbarGroupElement);
-        const viewportElement = document.createElement("div");
-        viewportElement.className = "markdown-preview-figure-viewer__viewport";
-        const canvasElement = document.createElement("div");
-        canvasElement.className = "markdown-preview-figure-viewer__canvas";
-        const contentElement = document.createElement("div");
-        contentElement.className = "markdown-preview-figure-viewer__content";
-        const viewerSvgElement = sourceSvgElement.cloneNode(true);
-        viewerSvgElement.removeAttribute("width");
-        viewerSvgElement.removeAttribute("height");
-        contentElement.appendChild(viewerSvgElement);
-        canvasElement.appendChild(contentElement);
-        viewportElement.appendChild(canvasElement);
-        viewerRoot.appendChild(toolbarElement);
-        viewerRoot.appendChild(viewportElement);
-        closeMermaidPreviewViewer();
-        const originalBodyOverflow = document.body.style.overflow;
-        document.body.appendChild(viewerRoot);
-        document.body.style.overflow = "hidden";
-        mermaidPreviewViewerState.root = viewerRoot;
-        mermaidPreviewViewerState.viewport = viewportElement;
-        mermaidPreviewViewerState.content = contentElement;
-        mermaidPreviewViewerState.svgElement = viewerSvgElement;
-        mermaidPreviewViewerState.open = true;
-        mermaidPreviewViewerState.scale = 1;
-        mermaidPreviewViewerState.baseWidth = viewerSize.width;
-        mermaidPreviewViewerState.baseHeight = viewerSize.height;
-        mermaidPreviewViewerState.previousBodyOverflow = originalBodyOverflow;
-        bindMermaidPreviewWheel(viewportElement);
-        bindMermaidPreviewDrag(viewportElement);
-        updateMermaidPreviewScale(1, "open");
+        emitPreviewSyncMessage(
+            MERMAID_PREVIEW_REQUEST_TYPE,
+            {
+                svgMarkup: serializeMermaidPreviewSvg(sourceSvgElement),
+                baseWidth: viewerSize.width,
+                baseHeight: viewerSize.height
+            },
+            "user",
+            previewSyncState.lastRenderedContentVersion || previewSyncState.lastAppliedContentVersion || 0
+        );
     }
 
     /**
@@ -1573,7 +1066,7 @@
      * 归一化预览正文区域的横向 wheel 方向。
      * 只在当前模式正文内部接管横向意图，并把浏览器默认的方向反转为更符合用户直觉的方向。
      * 横向意图一旦确认就阻止浏览器默认滚动，已经贴边时也要拦住，避免原始 delta 把位置从 0 或最大偏移拉回去。
-     * 纵向滚轮、Mermaid 查看层和非正文区域保持原样。
+     * 纵向滚轮和非正文区域保持原样。
      */
     function bindPreviewHorizontalWheelNormalization() {
         if (previewSyncState.previewHorizontalWheelListenerBound) {
@@ -1584,9 +1077,6 @@
             const currentModeElement = getCurrentModeElement();
             const eventTarget = normalizeWheelEventTarget(event && event.target);
             if (!currentModeElement || !eventTarget || !currentModeElement.contains(eventTarget)) {
-                return;
-            }
-            if (isMermaidPreviewViewerEventTarget(eventTarget)) {
                 return;
             }
             const horizontalDelta = getHorizontalWheelDelta(event);
@@ -2175,14 +1665,9 @@
 
     /**
      * 将正文中的稳定选区变化回传宿主。
-     * 当 Mermaid 查看层打开时，需要完全跳过本函数，避免查看层中的点击或临时选区清空正文选区同步状态。
      */
     function emitPreviewSelectionChanged() {
         const now = Date.now();
-        if (isMermaidPreviewViewerOpen()) {
-            debugPreviewSync("skip selection changed while mermaid viewer is open");
-            return;
-        }
         const selection = window.getSelection();
         if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
             debugPreviewSync("emit selection cleared");
@@ -2254,7 +1739,7 @@
 
     /**
      * 绑定正文滚动、点击和选区联动监听。
-     * 由于 Mermaid 查看层和正文处于同一 document，所有入口都必须先排除查看层事件，避免把局部查看动作误识别成正文意图。
+     * Mermaid 放大查看改到独立窗口后，这些监听只服务预览正文。
      */
     function bindPreviewSyncListeners() {
         if (!previewSyncState.previewScrollListenerBound) {
@@ -2270,23 +1755,14 @@
                     emitPreviewViewportChanged();
                 }, 80);
             }, true);
-            document.addEventListener("wheel", function (event) {
-                if (isMermaidPreviewViewerEventTarget(event.target)) {
-                    return;
-                }
+            document.addEventListener("wheel", function () {
                 markUserScrollIntent("wheel");
             }, {capture: true, passive: true});
-            document.addEventListener("touchmove", function (event) {
-                if (isMermaidPreviewViewerEventTarget(event.target)) {
-                    return;
-                }
+            document.addEventListener("touchmove", function () {
                 markUserScrollIntent("touchmove");
             }, {capture: true, passive: true});
             document.addEventListener("keydown", function (event) {
                 if (!event) {
-                    return;
-                }
-                if (isMermaidPreviewViewerOpen()) {
                     return;
                 }
                 const scrollKeys = ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "];
@@ -2302,18 +1778,12 @@
                 if (!container || !event || event.button !== 0) {
                     return;
                 }
-                if (isMermaidPreviewViewerEventTarget(event.target)) {
-                    return;
-                }
                 markUserSelectionIntent("mousedown");
                 if (event.target === container) {
                     markUserScrollIntent("mousedown:container");
                 }
             }, true);
-            document.addEventListener("touchstart", function (event) {
-                if (isMermaidPreviewViewerEventTarget(event.target)) {
-                    return;
-                }
+            document.addEventListener("touchstart", function () {
                 markUserSelectionIntent("touchstart");
                 markUserScrollIntent("touchstart");
             }, {capture: true, passive: true});
@@ -2321,9 +1791,6 @@
         if (!previewSyncState.previewSelectionListenerBound) {
             previewSyncState.previewSelectionListenerBound = true;
             document.addEventListener("selectionchange", function () {
-                if (isMermaidPreviewViewerOpen()) {
-                    return;
-                }
                 clearTimeout(previewSyncState.selectionThrottleTimer);
                 previewSyncState.selectionThrottleTimer = setTimeout(function () {
                     emitPreviewSelectionChanged();

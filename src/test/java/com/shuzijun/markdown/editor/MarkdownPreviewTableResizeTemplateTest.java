@@ -41,6 +41,21 @@ public class MarkdownPreviewTableResizeTemplateTest {
     private static final String PREVIEW_TABLE_SURFACE = ".vditor-preview .vditor-reset";
 
     /**
+     * 列宽光标图。左右箭头加竖向分割线。
+     */
+    private static final Path COLUMN_RESIZE_CURSOR_PATH = Path.of("src/main/resources/template/cursor/col-resize.png");
+
+    /**
+     * 行高光标图。上下箭头加横向分割线。
+     */
+    private static final Path ROW_RESIZE_CURSOR_PATH = Path.of("src/main/resources/template/cursor/row-resize.png");
+
+    /**
+     * 标准拖拽光标的边长。热点落在中心 16,16。
+     */
+    private static final int RESIZE_CURSOR_SIZE = 32;
+
+    /**
      * 验证尺寸记录和样式重放留在 head，不进入表格节点。
      *
      * @throws IOException 模板读取失败时抛出
@@ -102,9 +117,19 @@ public class MarkdownPreviewTableResizeTemplateTest {
                 defaultHtml.contains("html.markdown-preview-table-col-resize")
                         && defaultHtml.contains("html.markdown-preview-table-row-resize")
                         && defaultHtml.contains("document.documentElement"));
-        Assert.assertTrue("光标规则使用 important 压过默认箭头",
-                defaultHtml.contains("cursor: col-resize !important;")
-                        && defaultHtml.contains("cursor: row-resize !important;"));
+        Assert.assertTrue("光标图按标准关键字和中心热点引用",
+                defaultHtml.contains("{{service}}resources/template/cursor/col-resize.png")
+                        && defaultHtml.contains("{{service}}resources/template/cursor/row-resize.png")
+                        && defaultHtml.contains("16 16, col-resize")
+                        && defaultHtml.contains("16 16, row-resize"));
+        Assert.assertTrue("拖拽遮罩按列和行区分光标",
+                defaultHtml.contains("markdown-preview-table-resize-shield")
+                        && defaultHtml.contains("data-resize-kind=\"column\"")
+                        && defaultHtml.contains("data-resize-kind=\"row\""));
+        Assert.assertTrue("悬停格使用内联 important 光标，遮罩挂在 body 上",
+                defaultHtml.contains("setProperty(\"cursor\"")
+                        && defaultHtml.contains("document.body.appendChild(shield)")
+                        && defaultHtml.contains("function clearPreviewTableCellCursor("));
         Assert.assertTrue("左缘拖前一列，上缘拖上一行",
                 defaultHtml.contains("cell.cellIndex - 1")
                         && defaultHtml.contains("row.rowIndex - 1")
@@ -153,6 +178,22 @@ public class MarkdownPreviewTableResizeTemplateTest {
     }
 
     /**
+     * 验证两张拖拽光标图都是 32×32 的 PNG。
+     *
+     * @throws IOException 光标图读取失败时抛出
+     */
+    @Test
+    public void shouldKeepResizeCursorImagesAtStandardSize() throws IOException {
+        int[] columnSize = readPngSize(COLUMN_RESIZE_CURSOR_PATH);
+        int[] rowSize = readPngSize(ROW_RESIZE_CURSOR_PATH);
+
+        Assert.assertEquals("列宽光标宽度应为 32", RESIZE_CURSOR_SIZE, columnSize[0]);
+        Assert.assertEquals("列宽光标高度应为 32", RESIZE_CURSOR_SIZE, columnSize[1]);
+        Assert.assertEquals("行高光标宽度应为 32", RESIZE_CURSOR_SIZE, rowSize[0]);
+        Assert.assertEquals("行高光标高度应为 32", RESIZE_CURSOR_SIZE, rowSize[1]);
+    }
+
+    /**
      * 以 UTF-8 读取项目内文本文件。
      *
      * @param filePath 项目内相对路径
@@ -181,6 +222,27 @@ public class MarkdownPreviewTableResizeTemplateTest {
             return "";
         }
         return text.substring(start, end);
+    }
+
+    /**
+     * 读取 PNG 的 IHDR 宽高。
+     *
+     * @param filePath 光标图路径
+     * @return 下标 0 为宽度，下标 1 为高度
+     * @throws IOException 文件读取失败时抛出
+     */
+    private static int[] readPngSize(Path filePath) throws IOException {
+        byte[] data = Files.readAllBytes(filePath);
+        Assert.assertTrue("光标图应为 PNG", data.length > 24 && data[0] == (byte) 0x89);
+        int width = ((data[16] & 0xff) << 24)
+                | ((data[17] & 0xff) << 16)
+                | ((data[18] & 0xff) << 8)
+                | (data[19] & 0xff);
+        int height = ((data[20] & 0xff) << 24)
+                | ((data[21] & 0xff) << 16)
+                | ((data[22] & 0xff) << 8)
+                | (data[23] & 0xff);
+        return new int[]{width, height};
     }
 
     /**

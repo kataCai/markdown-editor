@@ -132,6 +132,22 @@
         html.markdown-preview-table-row-resize * {
             cursor: url("{{service}}resources/template/cursor/row-resize.png") 16 16, row-resize !important;
         }
+
+        /* 拖拽期间指针落在这层上，避免 JCEF 把光标锁回单元格上的箭头。 */
+        .markdown-preview-table-resize-shield {
+            position: fixed;
+            inset: 0;
+            z-index: 2147483000;
+            background: transparent;
+        }
+
+        .markdown-preview-table-resize-shield[data-resize-kind="column"] {
+            cursor: url("{{service}}resources/template/cursor/col-resize.png") 16 16, col-resize !important;
+        }
+
+        .markdown-preview-table-resize-shield[data-resize-kind="row"] {
+            cursor: url("{{service}}resources/template/cursor/row-resize.png") 16 16, row-resize !important;
+        }
     </style>
 </head>
 <body class="body">
@@ -1415,6 +1431,7 @@
      * `wysiwyg/ir` 走块级 DOM 顺序绑定；`sv` 先退化为按行高估算滚动，不阻塞整体联动闭环。
      */
     function rebuildPreviewSyncArtifacts() {
+        clearPreviewTableCellCursor();
         if (!vditor || !vditor.vditor) {
             return;
         }
@@ -2108,10 +2125,15 @@
     const PREVIEW_TABLE_COL_RESIZE_CLASS = "markdown-preview-table-col-resize";
     const PREVIEW_TABLE_ROW_RESIZE_CLASS = "markdown-preview-table-row-resize";
     const PREVIEW_TABLE_GUIDE_CLASS = "markdown-preview-table-resize-guide";
+    const PREVIEW_TABLE_SHIELD_CLASS = "markdown-preview-table-resize-shield";
+    const PREVIEW_TABLE_COL_RESIZE_CURSOR = "url(\"{{service}}resources/template/cursor/col-resize.png\") 16 16, col-resize";
+    const PREVIEW_TABLE_ROW_RESIZE_CURSOR = "url(\"{{service}}resources/template/cursor/row-resize.png\") 16 16, row-resize";
     const previewTableResizeState = {
         sizesByKey: {},
         drag: null,
         guideElement: null,
+        shieldElement: null,
+        cursorCell: null,
         bound: false,
         refreshTimer: 0,
         edgeScrollFrame: 0
@@ -2554,6 +2576,38 @@
         return choosePreviewTableResizeHit(columnHit, rowHit);
     }
 
+    function previewTableResizeCursorValue(kind) {
+        if (kind === "column") {
+            return PREVIEW_TABLE_COL_RESIZE_CURSOR;
+        }
+        if (kind === "row") {
+            return PREVIEW_TABLE_ROW_RESIZE_CURSOR;
+        }
+        return "";
+    }
+
+    function clearPreviewTableCellCursor() {
+        const cell = previewTableResizeState.cursorCell;
+        previewTableResizeState.cursorCell = null;
+        if (!cell || !cell.style) {
+            return;
+        }
+        cell.style.removeProperty("cursor");
+    }
+
+    function applyPreviewTableCellCursor(cell, kind) {
+        const cursorValue = previewTableResizeCursorValue(kind);
+        if (!cell || !cursorValue) {
+            clearPreviewTableCellCursor();
+            return;
+        }
+        if (previewTableResizeState.cursorCell && previewTableResizeState.cursorCell !== cell) {
+            previewTableResizeState.cursorCell.style.removeProperty("cursor");
+        }
+        cell.style.setProperty("cursor", cursorValue, "important");
+        previewTableResizeState.cursorCell = cell;
+    }
+
     function syncPreviewTableResizeCursor(kind) {
         const root = document.documentElement;
         if (!root) {
@@ -2561,6 +2615,27 @@
         }
         root.classList.toggle(PREVIEW_TABLE_COL_RESIZE_CLASS, kind === "column");
         root.classList.toggle(PREVIEW_TABLE_ROW_RESIZE_CLASS, kind === "row");
+    }
+
+    function showPreviewTableResizeShield(kind) {
+        let shield = previewTableResizeState.shieldElement;
+        if (!shield || !shield.isConnected) {
+            shield = document.createElement("div");
+            shield.className = PREVIEW_TABLE_SHIELD_CLASS;
+            document.body.appendChild(shield);
+            previewTableResizeState.shieldElement = shield;
+        }
+        shield.dataset.resizeKind = kind === "row" ? "row" : "column";
+        shield.style.display = "block";
+    }
+
+    function hidePreviewTableResizeShield() {
+        const shield = previewTableResizeState.shieldElement;
+        previewTableResizeState.shieldElement = null;
+        if (!shield) {
+            return;
+        }
+        shield.remove();
     }
 
     function ensurePreviewTableResizeGuide() {
@@ -2734,6 +2809,8 @@
             previewRecord: null
         };
         syncPreviewTableResizeCursor("column");
+        applyPreviewTableCellCursor(hit.cell, "column");
+        showPreviewTableResizeShield("column");
         showPreviewTableColumnGuide(hit.cell);
         document.addEventListener("mousemove", onPreviewTableResizeDragMove, true);
         document.addEventListener("mouseup", onPreviewTableResizeMouseUp, true);
@@ -2767,6 +2844,8 @@
             previewRecord: null
         };
         syncPreviewTableResizeCursor("row");
+        applyPreviewTableCellCursor(hit.cell, "row");
+        showPreviewTableResizeShield("row");
         showPreviewTableRowGuide(row);
         document.addEventListener("mousemove", onPreviewTableResizeDragMove, true);
         document.addEventListener("mouseup", onPreviewTableResizeMouseUp, true);
@@ -2823,6 +2902,8 @@
         }
         previewTableResizeState.drag = null;
         syncPreviewTableResizeCursor("");
+        clearPreviewTableCellCursor();
+        hidePreviewTableResizeShield();
         hidePreviewTableResizeGuide();
         applyPreviewTableSizeStyles();
     }
@@ -2834,10 +2915,12 @@
         const hit = findPreviewTableResizeHit(event);
         if (!hit) {
             syncPreviewTableResizeCursor("");
+            clearPreviewTableCellCursor();
             hidePreviewTableResizeGuide();
             return;
         }
         syncPreviewTableResizeCursor(hit.kind);
+        applyPreviewTableCellCursor(hit.cell, hit.kind);
         if (hit.kind === "row") {
             showPreviewTableRowGuide(hit.cell.parentElement);
             return;
@@ -2911,6 +2994,9 @@
         finishPreviewTableResizeDrag(drag.moved && drag.table.isConnected);
         const hit = findPreviewTableResizeHit(event);
         syncPreviewTableResizeCursor(hit ? hit.kind : "");
+        if (hit) {
+            applyPreviewTableCellCursor(hit.cell, hit.kind);
+        }
     }
 
     function onPreviewTableResizeDoubleClick(event) {

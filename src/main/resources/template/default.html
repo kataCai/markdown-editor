@@ -122,15 +122,15 @@
             background: rgba(120, 170, 255, .9);
         }
 
-        /* 盖过 style.css 里的全局 cursor: default。 */
-        #vditor.markdown-preview-table-col-resize,
-        #vditor.markdown-preview-table-col-resize * {
-            cursor: col-resize;
+        /* 挂在 html 上，并用 important 压过 style.css 里每个节点的 cursor: default。 */
+        html.markdown-preview-table-col-resize,
+        html.markdown-preview-table-col-resize * {
+            cursor: col-resize !important;
         }
 
-        #vditor.markdown-preview-table-row-resize,
-        #vditor.markdown-preview-table-row-resize * {
-            cursor: row-resize;
+        html.markdown-preview-table-row-resize,
+        html.markdown-preview-table-row-resize * {
+            cursor: row-resize !important;
         }
     </style>
 </head>
@@ -2555,7 +2555,7 @@
     }
 
     function syncPreviewTableResizeCursor(kind) {
-        const root = document.getElementById("vditor");
+        const root = document.documentElement;
         if (!root) {
             return;
         }
@@ -2909,6 +2909,8 @@
         }
         event.preventDefault();
         finishPreviewTableResizeDrag(drag.moved && drag.table.isConnected);
+        const hit = findPreviewTableResizeHit(event);
+        syncPreviewTableResizeCursor(hit ? hit.kind : "");
     }
 
     function onPreviewTableResizeDoubleClick(event) {

@@ -2100,7 +2100,8 @@
      */
     const PREVIEW_TABLE_SIZE_STYLE_ID = "markdown-preview-table-sizes";
     const PREVIEW_TABLE_HEADER_KEY_LIMIT = 120;
-    const PREVIEW_TABLE_RESIZE_HIT_PX = 6;
+    const PREVIEW_TABLE_RESIZE_HIT_PX = 12;
+    const PREVIEW_TABLE_RESIZE_HIT_MIN_PX = 4;
     const PREVIEW_TABLE_COLUMN_MIN_PX = 36;
     const PREVIEW_TABLE_EDGE_SCROLL_PX = 24;
     const PREVIEW_TABLE_EDGE_SCROLL_STEP_PX = 16;
@@ -2450,19 +2451,96 @@
         return widths;
     }
 
-    function pointerInsidePreviewTableCell(rect, clientX, clientY) {
-        return clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
-    }
-
-    /**
-     * 右边框向内 6px 命中列宽。底边留给行高，竖边优先。
-     */
-    function findPreviewTableResizeHit(event) {
-        const target = event.target;
+    function closestPreviewTableCell(target) {
         if (!target || !target.closest) {
             return null;
         }
-        const cell = target.closest("td, th");
+        return target.closest("td, th");
+    }
+
+    /**
+     * 指针不在单元格上时，再按坐标找一次。指示线不接收事件，不会挡住这次查找。
+     */
+    function resolvePreviewTableEventCell(event) {
+        const directCell = closestPreviewTableCell(event.target);
+        if (directCell || !document.elementFromPoint) {
+            return directCell;
+        }
+        return closestPreviewTableCell(document.elementFromPoint(event.clientX, event.clientY));
+    }
+
+    /**
+     * 窄格把热区收到格内尺寸的三分之一，并保留至少 4px，避免整格都变成拖拽。
+     */
+    function resolvePreviewTableHitSlop(length) {
+        const third = length / 3;
+        return Math.min(PREVIEW_TABLE_RESIZE_HIT_PX, Math.max(PREVIEW_TABLE_RESIZE_HIT_MIN_PX, third));
+    }
+
+    function previewTablePointNearEdge(client, edge, slop) {
+        return Math.abs(edge - client) <= slop;
+    }
+
+    function resolvePreviewTableColumnEdgeHit(cell, table, rect, clientX, clientY) {
+        const slop = resolvePreviewTableHitSlop(rect.width);
+        if (clientY < rect.top - slop || clientY > rect.bottom + slop) {
+            return null;
+        }
+        const rightDistance = Math.abs(rect.right - clientX);
+        const leftDistance = Math.abs(rect.left - clientX);
+        if (previewTablePointNearEdge(clientX, rect.right, slop) && rightDistance <= leftDistance) {
+            return {kind: "column", cell: cell, table: table, columnIndex: cell.cellIndex, distance: rightDistance};
+        }
+        if (!previewTablePointNearEdge(clientX, rect.left, slop) || cell.cellIndex <= 0) {
+            return null;
+        }
+        const previousCell = cell.parentElement ? cell.parentElement.cells[cell.cellIndex - 1] : null;
+        return {
+            kind: "column",
+            cell: previousCell || cell,
+            table: table,
+            columnIndex: cell.cellIndex - 1,
+            distance: leftDistance
+        };
+    }
+
+    function resolvePreviewTableRowEdgeHit(cell, table, rect, clientX, clientY) {
+        const row = cell.parentElement;
+        const slop = resolvePreviewTableHitSlop(rect.height);
+        if (!row || clientX < rect.left - slop || clientX > rect.right + slop) {
+            return null;
+        }
+        const bottomDistance = Math.abs(rect.bottom - clientY);
+        const topDistance = Math.abs(rect.top - clientY);
+        if (previewTablePointNearEdge(clientY, rect.bottom, slop) && bottomDistance <= topDistance) {
+            return {kind: "row", cell: cell, table: table, rowIndex: row.rowIndex, distance: bottomDistance};
+        }
+        if (!previewTablePointNearEdge(clientY, rect.top, slop) || row.rowIndex <= 0) {
+            return null;
+        }
+        const previousRow = table.rows[row.rowIndex - 1];
+        const previousCell = previousRow ? previousRow.cells[Math.min(cell.cellIndex, previousRow.cells.length - 1)] : null;
+        return {
+            kind: "row",
+            cell: previousCell || cell,
+            table: table,
+            rowIndex: row.rowIndex - 1,
+            distance: topDistance
+        };
+    }
+
+    function choosePreviewTableResizeHit(columnHit, rowHit) {
+        if (columnHit && rowHit && rowHit.distance < columnHit.distance) {
+            return rowHit;
+        }
+        return columnHit || rowHit;
+    }
+
+    /**
+     * 边线两侧都算热区。左缘拖前一列，上缘拖上一行。竖横同样近时算列宽。
+     */
+    function findPreviewTableResizeHit(event) {
+        const cell = resolvePreviewTableEventCell(event);
         if (!cell) {
             return null;
         }
@@ -2471,17 +2549,9 @@
             return null;
         }
         const rect = cell.getBoundingClientRect();
-        if (!pointerInsidePreviewTableCell(rect, event.clientX, event.clientY)) {
-            return null;
-        }
-        if (rect.right - event.clientX <= PREVIEW_TABLE_RESIZE_HIT_PX) {
-            return {kind: "column", cell: cell, table: table, columnIndex: cell.cellIndex};
-        }
-        if (rect.bottom - event.clientY <= PREVIEW_TABLE_RESIZE_HIT_PX) {
-            const row = cell.parentElement;
-            return {kind: "row", cell: cell, table: table, rowIndex: row ? row.rowIndex : -1};
-        }
-        return null;
+        const columnHit = resolvePreviewTableColumnEdgeHit(cell, table, rect, event.clientX, event.clientY);
+        const rowHit = resolvePreviewTableRowEdgeHit(cell, table, rect, event.clientX, event.clientY);
+        return choosePreviewTableResizeHit(columnHit, rowHit);
     }
 
     function syncPreviewTableResizeCursor(kind) {

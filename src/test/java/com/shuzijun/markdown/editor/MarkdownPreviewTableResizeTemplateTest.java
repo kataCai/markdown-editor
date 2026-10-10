@@ -92,20 +92,28 @@ public class MarkdownPreviewTableResizeTemplateTest {
                 afterHook.contains("bindPreviewTableResize();"));
         Assert.assertTrue("应保留拖拽绑定入口",
                 defaultHtml.contains("function bindPreviewTableResize("));
-        Assert.assertTrue("竖边热区为 6px，列宽下限为 36px",
-                defaultHtml.contains("const PREVIEW_TABLE_RESIZE_HIT_PX = 6;")
+        Assert.assertTrue("竖边热区为 12px，列宽下限为 36px",
+                defaultHtml.contains("const PREVIEW_TABLE_RESIZE_HIT_PX = 12;")
                         && defaultHtml.contains("const PREVIEW_TABLE_COLUMN_MIN_PX = 36;"));
         Assert.assertTrue("贴边滚动为 24px 热区、每帧 16px",
                 defaultHtml.contains("const PREVIEW_TABLE_EDGE_SCROLL_PX = 24;")
                         && defaultHtml.contains("const PREVIEW_TABLE_EDGE_SCROLL_STEP_PX = 16;"));
-        Assert.assertTrue("列宽和行高光标应盖过全局默认光标",
-                defaultHtml.contains("markdown-preview-table-col-resize")
-                        && defaultHtml.contains("cursor: col-resize;")
-                        && defaultHtml.contains("markdown-preview-table-row-resize")
-                        && defaultHtml.contains("cursor: row-resize;"));
-        Assert.assertTrue("指示线应挂在模式节点之外",
+        Assert.assertTrue("光标规则挂在 html 上",
+                defaultHtml.contains("html.markdown-preview-table-col-resize")
+                        && defaultHtml.contains("html.markdown-preview-table-row-resize")
+                        && defaultHtml.contains("document.documentElement"));
+        Assert.assertTrue("光标规则使用 important 压过默认箭头",
+                defaultHtml.contains("cursor: col-resize !important;")
+                        && defaultHtml.contains("cursor: row-resize !important;"));
+        Assert.assertTrue("左缘拖前一列，上缘拖上一行",
+                defaultHtml.contains("cell.cellIndex - 1")
+                        && defaultHtml.contains("row.rowIndex - 1")
+                        && defaultHtml.contains("document.elementFromPoint("));
+        Assert.assertTrue("指示线对齐共用边并加粗到 2px",
                 defaultHtml.contains("markdown-preview-table-resize-guide")
-                        && defaultHtml.contains("position: fixed;"));
+                        && defaultHtml.contains("position: fixed;")
+                        && defaultHtml.contains("cellRect.right + \"px\"")
+                        && defaultHtml.contains("guide.style.height = \"2px\""));
         Assert.assertTrue("行高按下前应先量内容高度",
                 defaultHtml.contains("function measurePreviewTableRowFloor("));
         Assert.assertTrue("双击应能分别清除列宽和行高",

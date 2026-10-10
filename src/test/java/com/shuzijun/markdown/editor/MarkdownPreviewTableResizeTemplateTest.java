@@ -130,6 +130,9 @@ public class MarkdownPreviewTableResizeTemplateTest {
                 defaultHtml.contains("setProperty(\"cursor\"")
                         && defaultHtml.contains("document.body.appendChild(shield)")
                         && defaultHtml.contains("function clearPreviewTableCellCursor("));
+        Assert.assertTrue("页面把光标计算值回传宿主",
+                defaultHtml.contains("emitPreviewSyncMessage(\"previewCursorTrace\"")
+                        && defaultHtml.contains("computedCursor: readPreviewCursorComputed(clientX, clientY)"));
         Assert.assertTrue("左缘拖前一列，上缘拖上一行",
                 defaultHtml.contains("cell.cellIndex - 1")
                         && defaultHtml.contains("row.rowIndex - 1")

@@ -272,6 +272,10 @@ public class MarkdownHtmlPanel extends JCEFHtmlPanel {
 
     @Override
     public void dispose() {
+        JComponent component = getComponent();
+        if (component != null) {
+            component.setCursor(Cursor.getDefaultCursor());
+        }
         getJBCefClient().removeDisplayHandler(previewCursorDisplayHandler, getCefBrowser());
         getJBCefClient().removeRequestHandler(requestHandler, getCefBrowser());
         getJBCefClient().removeLifeSpanHandler(lifeSpanHandler, getCefBrowser());

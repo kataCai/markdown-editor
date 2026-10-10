@@ -633,6 +633,9 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
                 + " shield=" + shield
                 + " browser=" + browserName
                 + " osr=false");
+        JComponent component = myPanel == null ? null : myPanel.getComponent();
+        ApplicationManager.getApplication().invokeLater(() ->
+                PreviewTableResizeCursor.apply(component, kind, computedCursor));
     }
 
     @NotNull

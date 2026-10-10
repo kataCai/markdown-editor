@@ -122,15 +122,15 @@
             background: rgba(120, 170, 255, .9);
         }
 
-        /* 挂在 html 上，并用 important 压过 style.css 里每个节点的 cursor: default。 */
+        /* 位图画出左右箭头加竖线、上下箭头加横线。关键字留给图片取不到时后备。 */
         html.markdown-preview-table-col-resize,
         html.markdown-preview-table-col-resize * {
-            cursor: col-resize !important;
+            cursor: url("{{service}}resources/template/cursor/col-resize.png") 16 16, col-resize !important;
         }
 
         html.markdown-preview-table-row-resize,
         html.markdown-preview-table-row-resize * {
-            cursor: row-resize !important;
+            cursor: url("{{service}}resources/template/cursor/row-resize.png") 16 16, row-resize !important;
         }
     </style>
 </head>

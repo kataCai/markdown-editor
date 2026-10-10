@@ -2595,9 +2595,9 @@
         }
         const cellRect = cell.getBoundingClientRect();
         const tableRect = table.getBoundingClientRect();
-        guide.style.left = (cellRect.right - 1) + "px";
+        guide.style.left = cellRect.right + "px";
         guide.style.top = tableRect.top + "px";
-        guide.style.width = "1px";
+        guide.style.width = "2px";
         guide.style.height = Math.max(tableRect.height, 1) + "px";
         guide.style.display = "block";
     }
@@ -2611,9 +2611,9 @@
         const rowRect = row.getBoundingClientRect();
         const tableRect = table.getBoundingClientRect();
         guide.style.left = tableRect.left + "px";
-        guide.style.top = (rowRect.bottom - 1) + "px";
+        guide.style.top = rowRect.bottom + "px";
         guide.style.width = Math.max(tableRect.width, 1) + "px";
-        guide.style.height = "1px";
+        guide.style.height = "2px";
         guide.style.display = "block";
     }
 

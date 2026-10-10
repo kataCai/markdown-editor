@@ -2134,6 +2134,7 @@
         guideElement: null,
         shieldElement: null,
         cursorCell: null,
+        tracedCursorKind: "",
         bound: false,
         refreshTimer: 0,
         edgeScrollFrame: 0
@@ -2608,6 +2609,39 @@
         previewTableResizeState.cursorCell = cell;
     }
 
+    function isPreviewTableResizeShieldConnected() {
+        const shield = previewTableResizeState.shieldElement;
+        return !!(shield && shield.isConnected);
+    }
+
+    function readPreviewCursorComputed(clientX, clientY) {
+        if (typeof clientX !== "number" || typeof clientY !== "number" || !document.elementFromPoint) {
+            return "";
+        }
+        const target = document.elementFromPoint(clientX, clientY);
+        if (!target) {
+            return "";
+        }
+        return window.getComputedStyle(target).cursor || "";
+    }
+
+    /**
+     * 只在种类变化、按下和松开时通知宿主。悬停移动不逐条发送。
+     */
+    function tracePreviewTableCursor(phase, kind, clientX, clientY) {
+        const normalizedKind = kind || "";
+        if (phase === "hover" && previewTableResizeState.tracedCursorKind === normalizedKind) {
+            return;
+        }
+        previewTableResizeState.tracedCursorKind = normalizedKind;
+        emitPreviewSyncMessage("previewCursorTrace", {
+            phase: phase,
+            kind: normalizedKind,
+            computedCursor: readPreviewCursorComputed(clientX, clientY),
+            shield: isPreviewTableResizeShieldConnected()
+        }, "programmatic");
+    }
+
     function syncPreviewTableResizeCursor(kind) {
         const root = document.documentElement;
         if (!root) {
@@ -2812,6 +2846,7 @@
         applyPreviewTableCellCursor(hit.cell, "column");
         showPreviewTableResizeShield("column");
         showPreviewTableColumnGuide(hit.cell);
+        tracePreviewTableCursor("drag-start", "column", event.clientX, event.clientY);
         document.addEventListener("mousemove", onPreviewTableResizeDragMove, true);
         document.addEventListener("mouseup", onPreviewTableResizeMouseUp, true);
         startPreviewTableEdgeScroll();
@@ -2847,6 +2882,7 @@
         applyPreviewTableCellCursor(hit.cell, "row");
         showPreviewTableResizeShield("row");
         showPreviewTableRowGuide(row);
+        tracePreviewTableCursor("drag-start", "row", event.clientX, event.clientY);
         document.addEventListener("mousemove", onPreviewTableResizeDragMove, true);
         document.addEventListener("mouseup", onPreviewTableResizeMouseUp, true);
         startPreviewTableEdgeScroll();
@@ -2891,6 +2927,9 @@
 
     function finishPreviewTableResizeDrag(commit) {
         const drag = previewTableResizeState.drag;
+        const endX = drag ? drag.clientX : null;
+        const endY = drag ? drag.clientY : null;
+        const hadDrag = !!drag;
         stopPreviewTableEdgeScroll();
         document.removeEventListener("mousemove", onPreviewTableResizeDragMove, true);
         document.removeEventListener("mouseup", onPreviewTableResizeMouseUp, true);
@@ -2906,6 +2945,9 @@
         hidePreviewTableResizeShield();
         hidePreviewTableResizeGuide();
         applyPreviewTableSizeStyles();
+        if (hadDrag) {
+            tracePreviewTableCursor("drag-end", "", endX, endY);
+        }
     }
 
     function onPreviewTableResizeHoverMove(event) {
@@ -2917,10 +2959,12 @@
             syncPreviewTableResizeCursor("");
             clearPreviewTableCellCursor();
             hidePreviewTableResizeGuide();
+            tracePreviewTableCursor("hover", "", event.clientX, event.clientY);
             return;
         }
         syncPreviewTableResizeCursor(hit.kind);
         applyPreviewTableCellCursor(hit.cell, hit.kind);
+        tracePreviewTableCursor("hover", hit.kind, event.clientX, event.clientY);
         if (hit.kind === "row") {
             showPreviewTableRowGuide(hit.cell.parentElement);
             return;
@@ -2997,6 +3041,7 @@
         if (hit) {
             applyPreviewTableCellCursor(hit.cell, hit.kind);
         }
+        tracePreviewTableCursor("hover", hit ? hit.kind : "", event.clientX, event.clientY);
     }
 
     function onPreviewTableResizeDoubleClick(event) {

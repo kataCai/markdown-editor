@@ -44,6 +44,11 @@ public class PreviewSyncMessage {
      */
     public static final String TYPE_PREVIEW_TAB_TRACE = "previewTabTrace";
     /**
+     * 页面把表格拖拽光标的种类和计算值回传宿主。
+     * 宿主写入 idea.log，并据此决定是否更换 IDE 窗口光标。
+     */
+    public static final String TYPE_PREVIEW_CURSOR_TRACE = "previewCursorTrace";
+    /**
      * 宿主通知页面在切回预览后采样当前滚动位置。
      */
     public static final String TYPE_SAMPLE_PREVIEW_TAB = "samplePreviewTabScroll";

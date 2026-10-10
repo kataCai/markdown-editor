@@ -94,6 +94,7 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
 
     private static final Logger LOG = Logger.getInstance(MarkdownPreviewFileEditor.class);
     private static final String PREVIEW_TAB_TRACE_PREFIX = "[preview-tab] ";
+    private static final String PREVIEW_CURSOR_LOG_PREFIX = "[preview-cursor] ";
     private static final int TEXT_TOP_LINE_TRACE_DELAY_MS = 200;
     private static final Pattern CODE_THEME_PATTERN = Pattern.compile("\"([^\"]+)\"");
     private static final Set<String> SUPPORTED_PREVIEW_CODE_THEMES = loadSupportedPreviewCodeThemes();
@@ -375,6 +376,9 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
             case PreviewSyncMessage.TYPE_PREVIEW_TAB_TRACE:
                 tracePreviewTab(formatPreviewTabTrace(message.getJSONObject("payload")));
                 break;
+            case PreviewSyncMessage.TYPE_PREVIEW_CURSOR_TRACE:
+                tracePreviewCursor(message.getJSONObject("payload"));
+                break;
             default:
                 break;
         }
@@ -606,6 +610,38 @@ public class MarkdownPreviewFileEditor extends UserDataHolderBase implements Fil
 
     private void tracePreviewTab(@NotNull String detail) {
         LOG.info(PREVIEW_TAB_TRACE_PREFIX + detail);
+    }
+
+    /**
+     * 把页面上报的表格光标计算值写入 idea.log。
+     * 浏览器类名用来区分 remote JCEF 和 OSR。osr 固定为 false，与面板的渲染选择一致。
+     *
+     * @param payload 页面上报的 phase、kind、computedCursor 和 shield
+     */
+    private void tracePreviewCursor(@Nullable JSONObject payload) {
+        String phase = readCursorPayload(payload, "phase");
+        String kind = readCursorPayload(payload, "kind");
+        String computedCursor = readCursorPayload(payload, "computedCursor");
+        boolean shield = payload != null && payload.getBooleanValue("shield");
+        String browserName = "unknown";
+        if (myPanel != null && myPanel.getCefBrowser() != null) {
+            browserName = myPanel.getCefBrowser().getClass().getName();
+        }
+        LOG.info(PREVIEW_CURSOR_LOG_PREFIX + "phase=" + phase
+                + " kind=" + kind
+                + " computed=" + computedCursor
+                + " shield=" + shield
+                + " browser=" + browserName
+                + " osr=false");
+    }
+
+    @NotNull
+    private static String readCursorPayload(@Nullable JSONObject payload, @NotNull String key) {
+        if (payload == null) {
+            return "";
+        }
+        String value = payload.getString(key);
+        return value == null ? "" : value;
     }
 
     @NotNull

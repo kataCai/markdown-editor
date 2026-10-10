@@ -78,6 +78,21 @@ public class MarkdownHtmlPanel extends JCEFHtmlPanel {
 
     private final CefRequestHandler requestHandler;
     private final CefLifeSpanHandler lifeSpanHandler;
+    private static final String PREVIEW_CURSOR_LOG_PREFIX = "[preview-cursor] ";
+    private static final int UNSEEN_CURSOR_TYPE = Integer.MIN_VALUE;
+    private final CefDisplayHandlerAdapter previewCursorDisplayHandler = new CefDisplayHandlerAdapter() {
+        private int lastCursorType = UNSEEN_CURSOR_TYPE;
+
+        @Override
+        public boolean onCursorChange(CefBrowser browser, int cursorType) {
+            if (cursorType == lastCursorType) {
+                return false;
+            }
+            lastCursorType = cursorType;
+            LOG.info(PREVIEW_CURSOR_LOG_PREFIX + "cursorType=" + cursorType);
+            return false;
+        }
+    };
     private final JBCefJSQuery selectValueJSQuery;
     private final JBCefJSQuery previewSyncBridgeJSQuery;
 
@@ -117,6 +132,7 @@ public class MarkdownHtmlPanel extends JCEFHtmlPanel {
             }
         });
 
+        getJBCefClient().addDisplayHandler(previewCursorDisplayHandler, getCefBrowser());
         getJBCefClient().addLoadHandler(new  CefLoadHandlerAdapter() {
             public void onLoadingStateChange(CefBrowser browser, boolean isLoading, boolean canGoBack, boolean canGoForward) {
                 if (initial.get()) {
@@ -256,6 +272,7 @@ public class MarkdownHtmlPanel extends JCEFHtmlPanel {
 
     @Override
     public void dispose() {
+        getJBCefClient().removeDisplayHandler(previewCursorDisplayHandler, getCefBrowser());
         getJBCefClient().removeRequestHandler(requestHandler, getCefBrowser());
         getJBCefClient().removeLifeSpanHandler(lifeSpanHandler, getCefBrowser());
         Disposer.dispose(selectValueJSQuery);
